@@ -188,13 +188,14 @@ func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 		{5, map[uint64]bool{}, StateCandidate},
 	}
 	for i, tt := range tests {
+		t.Logf("#%d", i)
 		r := newTestRaft(1, idsBySize(tt.size), 10, 1, NewMemoryStorage())
 
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		for id, vote := range tt.votes {
+			t.Logf("%d", id)
 			r.Step(pb.Message{From: id, To: 1, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: !vote})
 		}
-
 		if r.State != tt.state {
 			t.Errorf("#%d: state = %s, want %s", i, r.State, tt.state)
 		}
@@ -291,6 +292,7 @@ func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 		for len(r.readMessages()) == 0 {
 			r.tick()
 			time++
+			t.Logf("hello, time: %d", time)
 		}
 		timeouts[time] = true
 	}
