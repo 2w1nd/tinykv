@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -352,9 +353,22 @@ func (r *Raft) reset(term uint64) {
 	r.PendingConfIndex = 0
 }
 
+// for leader commit
 func (r *Raft) maybeCommit() bool {
-	mci := r.Prs[r.id].Match // todo 很诡异，下标是从0开始的
-	return r.RaftLog.maybeCommit(mci, r.Term)
+	i, n := 0, len(r.Prs)
+	srt := make(uint64Slice, n)
+	for _, prs := range r.Prs {
+		srt[i] = prs.Match
+		i++
+	}
+	sort.Sort(srt)
+	newCommitIndex := srt[n-(n/2+1)]
+	if newCommitIndex > r.RaftLog.committed {
+		if r.RaftLog.marchLog(r.Term, newCommitIndex) {
+			return r.RaftLog.maybeCommit(newCommitIndex, r.Term)
+		}
+	}
+	return false
 }
 
 func (r *Raft) appendEntry(es ...*pb.Entry) (accepted bool) {

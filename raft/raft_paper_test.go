@@ -457,7 +457,6 @@ func TestLeaderAcknowledgeCommit2AB(t *testing.T) {
 		{5, map[uint64]bool{2: true, 3: true, 4: true, 5: true}, true},
 	}
 	for i, tt := range tests {
-		t.Logf("#%d", i)
 		s := NewMemoryStorage()
 		r := newTestRaft(1, idsBySize(tt.size), 10, 1, s)
 		r.becomeCandidate()
@@ -471,7 +470,7 @@ func TestLeaderAcknowledgeCommit2AB(t *testing.T) {
 				r.Step(acceptAndReply(m))
 			}
 		}
-		t.Logf("committed Index: %d, last Index: %d", r.RaftLog.committed, li)
+
 		if g := r.RaftLog.committed > li; g != tt.wack {
 			t.Errorf("#%d: ack commit = %v, want %v", i, g, tt.wack)
 		}

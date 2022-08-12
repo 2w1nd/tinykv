@@ -92,6 +92,7 @@ func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
 }
 
+// for follower append entries, commit log
 func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, ents ...*pb.Entry) (lastnewi uint64, ok bool) {
 	if l.matchTerm(index, logTerm) {
 		lastnewi = index + uint64(len(ents))
@@ -248,6 +249,11 @@ func (l *RaftLog) Entries(lo, hi uint64) ([]pb.Entry, error) {
 
 func (l *RaftLog) isUpToDate(index, term uint64) bool {
 	return term > l.LastTerm() || (term == l.LastTerm() && index >= l.LastIndex())
+}
+
+func (l *RaftLog) marchLog(term, index uint64) bool {
+	logTerm, _ := l.Term(index - l.firstIndex)
+	return index <= l.LastIndex() && logTerm == term
 }
 
 func (l *RaftLog) matchTerm(i, term uint64) bool {
