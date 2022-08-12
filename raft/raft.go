@@ -283,14 +283,14 @@ func (r *Raft) sendAppend(to uint64) bool {
 	if r.RaftLog.LastIndex() < pr.Next-1 {
 		return true
 	}
-	term, errt := r.RaftLog.Term(pr.Next)
+	term, errt := r.RaftLog.Term(pr.Next - 1)
 	ents, _ := r.RaftLog.Entries(pr.Next, r.RaftLog.LastIndex()+1)
 	if errt != nil {
 		m.MsgType = pb.MessageType_MsgSnapshot
 		//snapshot, err := r.RaftLog
 	} else {
 		m.MsgType = pb.MessageType_MsgAppend
-		m.Index = pr.Next
+		m.Index = pr.Next - 1
 		m.LogTerm = term
 		m.Commit = r.RaftLog.committed
 		var sendEntry []*pb.Entry
@@ -369,7 +369,9 @@ func (r *Raft) appendEntry(es ...*pb.Entry) (accepted bool) {
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = max(r.Prs[r.id].Next, li+1)
 	// commit
-	r.maybeCommit()
+	if len(r.Prs) == 1 {
+		r.maybeCommit()
+	}
 	return true
 }
 
@@ -642,14 +644,16 @@ func (r *Raft) stepLeader(m pb.Message) error {
 				pr.Match = m.Index
 				pr.Next = m.Index + 1
 			}
-			r.maybeCommit()
+			if r.maybeCommit() {
+				r.sendAppend(m.From)
+			}
 			if m.From == r.leadTransferee && pr.Match == r.RaftLog.LastIndex() {
 				log.Infof("%x sent MsgTimeoutNow to %x after received MsgAppResp", r.id, m.From)
 				r.sendTimeoutNow(m.From)
 			}
 		}
 	case pb.MessageType_MsgHeartbeatResponse:
-		//todo
+		// todo
 		if pr.Match < r.RaftLog.LastIndex() {
 			r.sendAppend(m.From)
 		}

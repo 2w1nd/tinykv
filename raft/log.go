@@ -165,7 +165,19 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	// Your Code Here (2A).
+	//off := max(l.applied+1, l.firstIndex)
+	//if l.committed+1 > off {
+	//	ents, err := l.slice(off, l.committed+1, l.maxNextEntsSize)
+	//	if err != nil {
+	//		l.logger.Panicf("unexpected error when getting unapplied entries (%v)", err)
+	//	}
+	//	return ents
+	//}
+	//return nil
+
+	if len(l.entries) > 0 {
+		return l.entries[l.applied-l.firstIndex+1 : l.committed-l.firstIndex+1]
+	}
 	return nil
 }
 
