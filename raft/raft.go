@@ -295,8 +295,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 		m.LogTerm = term
 		m.Commit = r.RaftLog.committed
 		var sendEntry []*pb.Entry
-		for _, en := range ents {
-			sendEntry = append(sendEntry, &en)
+		for i, _ := range ents {
+			sendEntry = append(sendEntry, &ents[i])
 		}
 		m.Entries = sendEntry
 	}
@@ -348,6 +348,7 @@ func (r *Raft) reset(term uint64) {
 	r.heartbeatElapsed = 0
 	r.resetRandomizedElectionTimeout()
 	// todo 还有一些etcd中的处理
+	r.resetVotes()
 	r.abortLeaderTransfer()
 
 	r.PendingConfIndex = 0
@@ -471,6 +472,7 @@ func (r *Raft) becomeLeader() {
 func (r *Raft) hup() {
 	if r.State == StateLeader {
 		log.Debugf("%x ignoring MsgHup because already leader", r.id)
+		return
 	}
 	// todo 一些扩展的判断
 	log.Infof("%x is starting a new election at term %d", r.id, r.Term)
@@ -620,7 +622,7 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 
 func (r *Raft) stepLeader(m pb.Message) error {
 	switch m.MsgType {
-	case pb.MessageType_MsgHeartbeat:
+	case pb.MessageType_MsgBeat:
 		r.bcastHeartbeat()
 		return nil
 	case pb.MessageType_MsgPropose:
@@ -653,6 +655,21 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		if m.Reject {
 			log.Debugf("%x received MsgAppResp(rejected, hint: (term %d)) from %x for index %d",
 				r.id, m.LogTerm, m.From, m.Index)
+			// 这里tinykv的msg没有hintIndex，所以需要leader根据logterm进行处理
+			if m.Index == None {
+				return nil
+			}
+			if m.LogTerm != None {
+				l := r.RaftLog
+				sliceIndex := sort.Search(len(l.entries), func(i int) bool {
+					return l.entries[i].Term > m.LogTerm
+				})
+				if sliceIndex > 0 && l.entries[sliceIndex-1].Term == m.LogTerm {
+					m.Index = uint64(sliceIndex) + l.firstIndex
+				}
+			}
+			r.Prs[m.From].Next = m.Index
+			r.sendAppend(m.From)
 		} else {
 			if pr.Match < m.Index {
 				pr.Match = m.Index
@@ -689,6 +706,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	} else {
 		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
 			r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
+		if m.Index > r.RaftLog.LastIndex() {
+			r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.LastIndex() + 1,
+				Reject: true, LogTerm: None})
+			return
+		}
 		hintIndex := min(m.Index, r.RaftLog.LastIndex())
 		hintIndex = r.RaftLog.findConflictByTerm(hintIndex, m.LogTerm)
 		hintTerm, err := r.RaftLog.Term(hintIndex)
@@ -740,6 +762,10 @@ func (r *Raft) resetRandomizedElectionTimeout() {
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
 }
 
+func (r *Raft) resetVotes() {
+	r.votes = map[uint64]bool{}
+}
+
 func (r *Raft) abortLeaderTransfer() {
 	r.leadTransferee = None
 }
@@ -768,5 +794,6 @@ func (r *Raft) TallyVotes() (granted int, rejected int, result VoteResult) {
 	} else {
 		result = VotePending
 	}
+	rejected = votes - granted
 	return granted, rejected, result
 }

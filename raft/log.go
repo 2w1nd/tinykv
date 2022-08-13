@@ -123,7 +123,23 @@ func (l *RaftLog) append(ents ...*pb.Entry) uint64 {
 	}
 	// todo 应该还有其他情况
 	for _, ent := range ents {
-		l.entries = append(l.entries, *ent)
+		if ent.Index < l.firstIndex {
+			continue
+		}
+		if ent.Index <= l.LastIndex() {
+			logTerm, err := l.Term(ent.Index)
+			if err != nil {
+				panic(err)
+			}
+			if logTerm != ent.Term {
+				idx := ent.Index - l.firstIndex
+				l.entries[idx] = *ent
+				l.entries = l.entries[:idx+1]
+				l.stabled = min(l.stabled, ent.Index-1)
+			}
+		} else {
+			l.entries = append(l.entries, *ent)
+		}
 	}
 	return l.LastIndex()
 }
@@ -252,7 +268,7 @@ func (l *RaftLog) isUpToDate(index, term uint64) bool {
 }
 
 func (l *RaftLog) marchLog(term, index uint64) bool {
-	logTerm, _ := l.Term(index - l.firstIndex)
+	logTerm, _ := l.Term(index)
 	return index <= l.LastIndex() && logTerm == term
 }
 

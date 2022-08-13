@@ -781,7 +781,7 @@ func testCandidateResetTerm(t *testing.T, mt pb.MessageType) {
 
 	nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgHup})
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
-
+	// todo 问题：处理appendentries不正常，#2当选时未能同步其日志到其他节点，同时注意#1第一次当选时#3未能同步日志
 	if a.State != StateLeader {
 		t.Errorf("state = %s, want %s", a.State, StateLeader)
 	}
@@ -959,10 +959,20 @@ func TestRecvMessageType_MsgBeat2AA(t *testing.T) {
 	}
 
 	for i, tt := range tests {
+		t.Logf("#%d", i)
 		sm := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		sm.RaftLog = newLog(newMemoryStorageWithEnts([]pb.Entry{{}, {Index: 1, Term: 0}, {Index: 2, Term: 1}}))
 		sm.Term = 1
 		sm.State = tt.state
+		// 改下测试用例
+		switch tt.state {
+		case StateFollower:
+			sm.step = sm.stepFollower
+		case StateCandidate:
+			sm.step = sm.stepCandidate
+		case StateLeader:
+			sm.step = sm.stepLeader
+		}
 		sm.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgBeat})
 
 		msgs := sm.readMessages()
