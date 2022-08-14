@@ -264,6 +264,7 @@ func (l *RaftLog) Entries(lo, hi uint64) ([]pb.Entry, error) {
 }
 
 func (l *RaftLog) isUpToDate(index, term uint64) bool {
+	// 如果两份日志最后的条目的任期号不同，那么任期号大的日志更加新。如果两份日志最后的条目任期号相同，那么日志比较长的那个就更加新
 	return term > l.LastTerm() || (term == l.LastTerm() && index >= l.LastIndex())
 }
 

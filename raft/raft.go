@@ -284,15 +284,16 @@ func (r *Raft) sendAppend(to uint64) bool {
 	if r.RaftLog.LastIndex() < pr.Next-1 {
 		return true
 	}
-	term, errt := r.RaftLog.Term(pr.Next - 1)
-	ents, _ := r.RaftLog.Entries(pr.Next, r.RaftLog.LastIndex()+1)
+	preLogIndex := pr.Next - 1
+	preLogTerm, errt := r.RaftLog.Term(preLogIndex)
+	ents, _ := r.RaftLog.Entries(preLogIndex+1, r.RaftLog.LastIndex()+1)
 	if errt != nil {
 		m.MsgType = pb.MessageType_MsgSnapshot
 		//snapshot, err := r.RaftLog
 	} else {
 		m.MsgType = pb.MessageType_MsgAppend
-		m.Index = pr.Next - 1
-		m.LogTerm = term
+		m.Index = preLogIndex
+		m.LogTerm = preLogTerm
 		m.Commit = r.RaftLog.committed
 		var sendEntry []*pb.Entry
 		for i, _ := range ents {
@@ -347,10 +348,16 @@ func (r *Raft) reset(term uint64) {
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.resetRandomizedElectionTimeout()
-	// todo 还有一些etcd中的处理
-	r.resetVotes()
-	r.abortLeaderTransfer()
 
+	r.abortLeaderTransfer()
+	r.resetVotes()
+	for peer := range r.Prs {
+		r.Prs[peer].Match = 0
+		r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
+		if peer == r.id {
+			r.Prs[peer].Match = r.RaftLog.LastIndex()
+		}
+	}
 	r.PendingConfIndex = 0
 }
 
@@ -416,7 +423,7 @@ func (r *Raft) tickHeartBeat() {
 	}
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
-		if err := r.Step(pb.Message{From: r.id, MsgType: pb.MessageType_MsgHeartbeat}); err != nil {
+		if err := r.Step(pb.Message{From: r.id, MsgType: pb.MessageType_MsgBeat}); err != nil {
 			log.Debugf("error occurred during checking sending heartbeat: %v", err)
 		}
 	}
@@ -676,7 +683,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 				pr.Next = m.Index + 1
 			}
 			if r.maybeCommit() {
-				r.sendAppend(m.From)
+				r.bcastAppend()
 			}
 			if m.From == r.leadTransferee && pr.Match == r.RaftLog.LastIndex() {
 				log.Infof("%x sent MsgTimeoutNow to %x after received MsgAppResp", r.id, m.From)
