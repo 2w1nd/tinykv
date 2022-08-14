@@ -90,6 +90,15 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	first, _ := l.storage.FirstIndex()
+	if first > l.firstIndex {
+		if len(l.entries) > 0 {
+			entries := l.entries[first-l.firstIndex:]
+			l.entries = make([]pb.Entry, len(entries))
+			copy(l.entries, entries)
+		}
+		l.firstIndex = first
+	}
 }
 
 // for follower append entries, commit log
@@ -227,6 +236,11 @@ func (l *RaftLog) commitTo(tocommit uint64) {
 		}
 		l.committed = tocommit
 	}
+}
+
+func (l *RaftLog) stableTo(index uint64, term uint64) {
+	// todo ?
+	l.stabled = index
 }
 
 func (l *RaftLog) LastTerm() uint64 {

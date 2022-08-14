@@ -254,6 +254,16 @@ func newRaft(c *Config) *Raft {
 	return r
 }
 
+func (r *Raft) softState() *SoftState { return &SoftState{Lead: r.Lead, RaftState: r.State} }
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
+}
+
 func (r *Raft) send(m pb.Message) {
 	if m.From == None {
 		m.From = r.id
@@ -336,6 +346,25 @@ func (r *Raft) bcastHeartbeat() {
 			continue
 		}
 		r.sendHeartbeat(peer)
+	}
+}
+
+func (r *Raft) advance(rd Ready) {
+	if newApplied := rd.appliedCursor(); newApplied > 0 {
+		oldApplied := r.RaftLog.applied
+		r.RaftLog.appliedTo(newApplied)
+
+		//  todo project3会用
+		if oldApplied <= r.PendingConfIndex && newApplied >= r.PendingConfIndex && r.State == StateLeader {
+			log.Infof("initiating automatic transition out of joint configuration")
+		}
+	}
+	if len(rd.Entries) > 0 {
+		e := rd.Entries[len(rd.Entries)-1]
+		r.RaftLog.stableTo(e.Index, e.Term)
+	}
+	if !IsEmptySnap(&rd.Snapshot) {
+
 	}
 }
 
