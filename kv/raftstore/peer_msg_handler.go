@@ -2,6 +2,9 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -42,7 +45,46 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
-	// Your Code Here (2B).
+	if d.RaftGroup.HasReady() {
+		rd := d.RaftGroup.Ready()
+		ready := d.RaftGroup.Ready()
+
+		result, err := d.peerStorage.SaveReadyState(&ready)
+		if err != nil {
+			panic(err)
+		}
+		if result != nil {
+			if !reflect.DeepEqual(result.PrevRegion, result.Region) {
+				d.peerStorage.SetRegion(result.Region)
+				storeMeta := d.ctx.storeMeta
+				storeMeta.Lock()
+				storeMeta.regions[result.Region.Id] = result.Region
+				storeMeta.regionRanges.Delete(&regionItem{region: result.PrevRegion})
+				storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: result.Region})
+				storeMeta.Unlock()
+			}
+		}
+		d.Send(d.ctx.trans, ready.Messages)
+		if len(ready.CommittedEntries) > 0 {
+			oldProposals := d.proposals
+			kvWB := new(engine_util.WriteBatch)
+			for _, entry := range rd.CommittedEntries {
+				kvWB = d.process(&entry, kvWB)
+				if d.stopped {
+					return
+				}
+			}
+			d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+			if len(oldProposals) > len(d.proposals) {
+				proposals := make([]*proposal, len(d.proposals))
+				copy(proposals, d.proposals)
+				d.proposals = proposals
+			}
+		}
+		d.RaftGroup.Advance(ready)
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
