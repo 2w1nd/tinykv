@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"reflect"
 	"time"
 
@@ -41,15 +42,30 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
+func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	err := msg.Unmarshal(entry.Data)
+	if err != nil {
+		panic(err)
+	}
+	if len(msg.Requests) > 0 {
+
+	}
+	if msg.AdminRequest != nil {
+		return wb
+	}
+	return wb
+}
+
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		ready := d.RaftGroup.Ready()
+		//ready := d.RaftGroup.Ready()
 
-		result, err := d.peerStorage.SaveReadyState(&ready)
+		result, err := d.peerStorage.SaveReadyState(&rd)
 		if err != nil {
 			panic(err)
 		}
@@ -64,8 +80,8 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				storeMeta.Unlock()
 			}
 		}
-		d.Send(d.ctx.trans, ready.Messages)
-		if len(ready.CommittedEntries) > 0 {
+		d.Send(d.ctx.trans, rd.Messages) // 发送Ready中Msg
+		if len(rd.CommittedEntries) > 0 {
 			oldProposals := d.proposals
 			kvWB := new(engine_util.WriteBatch)
 			for _, entry := range rd.CommittedEntries {
@@ -83,7 +99,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				d.proposals = proposals
 			}
 		}
-		d.RaftGroup.Advance(ready)
+		d.RaftGroup.Advance(rd)
 	}
 }
 
@@ -155,7 +171,11 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
-	// Your Code Here (2B).
+	if msg.AdminRequest != nil {
+
+	} else {
+
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
