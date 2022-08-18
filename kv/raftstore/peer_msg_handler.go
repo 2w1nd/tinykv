@@ -63,7 +63,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		//ready := d.RaftGroup.Ready()
 
 		result, err := d.peerStorage.SaveReadyState(&rd)
 		if err != nil {

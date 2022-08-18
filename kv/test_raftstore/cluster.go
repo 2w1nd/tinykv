@@ -92,7 +92,7 @@ func (c *Cluster) Start() {
 		Version: raftstore.InitEpochVer,
 		ConfVer: raftstore.InitEpochConfVer,
 	}
-	firstRegion := &metapb.Region{
+	firstRegion := &metapb.Region{ // 每次只启动一个region？
 		Id:          1,
 		StartKey:    []byte{},
 		EndKey:      []byte{},

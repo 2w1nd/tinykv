@@ -307,8 +307,12 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
-	// Your Code Here (2B).
-	// todo
+	if len(entries) == 0 {
+		return nil
+	}
+	first, _ := ps.FirstIndex()
+	last := entries[len(entries)-1].Index
+
 	return nil
 }
 
