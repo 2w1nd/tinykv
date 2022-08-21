@@ -176,14 +176,17 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	switch msg.Type {
 	// 1. raft内部消息
 	case message.MsgTypeRaftMessage:
-		log.Infof("handle MsgTypeRaftMessage: %v", msg)
 		raftMsg := msg.Data.(*rspb.RaftMessage)
+		log.Infof("handle raftMsg type: %v, regionID: %d, from: %d, to: %d, entries: %v", raftMsg.Message.MsgType,
+			raftMsg.RegionId, raftMsg.FromPeer, raftMsg.ToPeer, raftMsg.Message.Entries)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
 	// 2. client消息
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
+		log.Infof("handle raftCMD type: %v, to: %d, store: %d", raftCMD.Request.Requests[0].CmdType,
+			raftCMD.Request.Header.Peer.Id, raftCMD.Request.Header.Peer.StoreId)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
 		d.onTick()
