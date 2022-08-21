@@ -313,6 +313,22 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	first, _ := ps.FirstIndex()
 	last := entries[len(entries)-1].Index
 
+	if first > entries[0].Index {
+		entries = entries[first-entries[0].Index:]
+	}
+
+	regionId := ps.region.GetId()
+	for _, entry := range entries {
+		raftWB.SetMeta(meta.RaftLogKey(regionId, entry.Index), &entry)
+	}
+	prevLast, _ := ps.LastIndex()
+	if prevLast > last {
+		for i := last + 1; i <= prevLast; i++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(regionId, i))
+		}
+	}
+	ps.raftState.LastIndex = last
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
 

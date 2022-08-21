@@ -200,9 +200,9 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	//	return ents
 	//}
 	//return nil
-
 	if len(l.entries) > 0 {
-		return l.entries[l.applied-l.firstIndex+1 : l.committed-l.firstIndex+1]
+		ents = l.entries[l.applied-l.firstIndex+1 : l.committed-l.firstIndex+1]
+		return ents
 	}
 	return nil
 }

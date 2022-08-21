@@ -181,13 +181,15 @@ func (c *Cluster) AllocPeer(storeID uint64) *metapb.Peer {
 	return NewPeer(storeID, id)
 }
 
+// requst 会经过这里将client请求的request封装然后发送出去
 func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
 	startTime := time.Now()
-	for i := 0; i < 10 || time.Since(startTime) < timeout; i++ {
+	for i := 0; i < 1 || time.Since(startTime) < timeout; i++ { // 重复10次，直到收到正确的Response并且没有到达规定的Request的超时限制
 		region := c.GetRegion(key)
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
+
 		if resp == nil {
 			// it should be timeouted innerly
 			SleepMS(100)
@@ -197,11 +199,13 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 			SleepMS(100)
 			continue
 		}
+		log.Infof("resp:[%v]", resp)
 		return resp, txn
 	}
 	panic("request timeout")
 }
 
+// CallCommand 通过NodeSimulator，将requst通过router发送到sender中，交给worker处理
 func (c *Cluster) CallCommand(request *raft_cmdpb.RaftCmdRequest, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
 	storeID := request.Header.Peer.StoreId
 	return c.simulator.CallCommandOnStore(storeID, request, timeout)
@@ -219,6 +223,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 			panic(fmt.Sprintf("can't get leader of region %d", regionID))
 		}
 		request.Header.Peer = leader
+		log.Infof("request 111")
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)

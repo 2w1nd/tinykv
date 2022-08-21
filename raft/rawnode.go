@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -49,10 +50,12 @@ type Ready struct {
 	// The current state of a Node to be saved to stable storage BEFORE
 	// Messages are sent.
 	// HardState will be equal to empty state if there is no update.
+	// 节点元信息的更新，term，commitIndex等
 	pb.HardState
 
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
+	// 日志，最后需要持久化
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
@@ -61,6 +64,7 @@ type Ready struct {
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
+	// 哪些entry被commit了，最后apply
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
@@ -75,9 +79,9 @@ func (rd Ready) appliedCursor() uint64 {
 	if n := len(rd.CommittedEntries); n > 0 {
 		return rd.CommittedEntries[n-1].Index
 	}
-	if index := rd.Snapshot.Metadata.Index; index > 0 {
-		return index
-	}
+	//if index := rd.Snapshot.Metadata.Index; index > 0 {
+	//	return index
+	//}
 	return 0
 }
 
@@ -114,6 +118,7 @@ func (rn *RawNode) Campaign() error {
 // Propose proposes data be appended to the raft log.
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
+	log.Infof("%d propose data: %v", rn.Raft.id, ent)
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		From:    rn.Raft.id,
@@ -188,15 +193,20 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	r := rn.Raft
 	if !r.softState().equal(rn.prevSoftSt) {
+		log.Infof("softSt %v no equal prevSt", r.softState(), rn.prevSoftSt)
 		return true
 	}
+	// hardState是否发生变化
 	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
+		log.Infof("hardSt need apply: %v", rn.prevHardSt)
 		return true
 	}
 	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
 		return true
 	}
+	// 是否有消息需要发送？是否有新增的unstable entry和需要被apply的entry
 	if len(r.msgs) > 0 || len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.nextEnts()) > 0 {
+		log.Infof("msg: %v ; unstableEntries: %v ; nextEnts: %v", r.msgs, r.RaftLog.unstableEntries(), r.RaftLog.nextEnts())
 		return true
 	}
 	return false
