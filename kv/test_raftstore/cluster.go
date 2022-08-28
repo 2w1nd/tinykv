@@ -58,7 +58,7 @@ func (c *Cluster) Start() {
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
-		dbPath, err := ioutil.TempDir("", c.baseDir)
+		dbPath, err := ioutil.TempDir("./tmp", "test-raftstore")
 		if err != nil {
 			panic(err)
 		}
@@ -184,7 +184,7 @@ func (c *Cluster) AllocPeer(storeID uint64) *metapb.Peer {
 // requst 会经过这里将client请求的request封装然后发送出去
 func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
 	startTime := time.Now()
-	for i := 0; i < 1 || time.Since(startTime) < timeout; i++ { // 重复10次，直到收到正确的Response并且没有到达规定的Request的超时限制
+	for i := 0; i < 10 || time.Since(startTime) < timeout; i++ { // 重复10次，直到收到正确的Response并且没有到达规定的Request的超时限制
 		region := c.GetRegion(key)
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
@@ -215,7 +215,6 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 	startTime := time.Now()
 	regionID := request.Header.RegionId
 	leader := c.LeaderOfRegion(regionID)
-	log.Infof("request 222")
 	for {
 		if time.Since(startTime) > timeout {
 			return nil, nil

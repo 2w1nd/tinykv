@@ -6,6 +6,7 @@ import (
 	"github.com/pingcap/errors"
 )
 
+// WriteBatch 用于批量写入数据（通过事务）
 type WriteBatch struct {
 	entries       []*badger.Entry
 	size          int

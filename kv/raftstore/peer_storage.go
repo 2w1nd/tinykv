@@ -310,24 +310,31 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	if len(entries) == 0 {
 		return nil
 	}
-	first, _ := ps.FirstIndex()
-	last := entries[len(entries)-1].Index
+	psFirst, _ := ps.FirstIndex()
+	psLast, _ := ps.LastIndex()
+	appendFirst := entries[0].Index
+	appendLast := entries[len(entries)-1].Index
 
-	if first > entries[0].Index {
-		entries = entries[first-entries[0].Index:]
+	if appendLast < psFirst {
+		return nil
+	}
+
+	if psFirst > appendFirst {
+		entries = entries[psFirst-entries[0].Index:]
 	}
 
 	regionId := ps.region.GetId()
 	for _, entry := range entries {
 		raftWB.SetMeta(meta.RaftLogKey(regionId, entry.Index), &entry)
 	}
-	prevLast, _ := ps.LastIndex()
-	if prevLast > last {
-		for i := last + 1; i <= prevLast; i++ {
+
+	// 删除之前的日志，这些是不会被commit的，为什么会有存在这些日志?原因见raft论文
+	if psLast > appendLast {
+		for i := appendLast + 1; i <= psLast; i++ {
 			raftWB.DeleteMeta(meta.RaftLogKey(regionId, i))
 		}
 	}
-	ps.raftState.LastIndex = last
+	ps.raftState.LastIndex = appendLast
 	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
@@ -347,8 +354,9 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	return nil, nil
 }
 
-// Save memory states to disk.
+// SaveReadyState Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
+// 存储Ready中的状态，方便以后恢复
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	raftWB := new(engine_util.WriteBatch)

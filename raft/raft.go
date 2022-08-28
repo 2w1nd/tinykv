@@ -296,10 +296,25 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	preLogIndex := pr.Next - 1
 	preLogTerm, errt := r.RaftLog.Term(preLogIndex)
-	ents, _ := r.RaftLog.Entries(preLogIndex+1, r.RaftLog.LastIndex()+1)
-	if errt != nil {
+	ents, erre := r.RaftLog.Entries(preLogIndex+1, r.RaftLog.LastIndex()+1)
+	if errt != nil || erre != nil {
 		m.MsgType = pb.MessageType_MsgSnapshot
-		//snapshot, err := r.RaftLog
+		snapshot, err := r.RaftLog.snapshot()
+		m.Snapshot = &snapshot
+		if err != nil {
+			if err == ErrSnapshotTemporarilyUnavailable {
+				log.Debugf("%x failed to send snapshot to %x because snapshot is temporarily unavailable", r.id, to)
+				return false
+			}
+			panic(err)
+		}
+		if IsEmptySnap(&snapshot) {
+			panic("need non-empty snapshot")
+		}
+		m.Snapshot = &snapshot
+		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
+		log.Debugf("%x [firstindex: %d, commit: %d] sent snapshot[index: %d, term: %d] to %x",
+			r.id, r.RaftLog.FirstIndex(), r.RaftLog.committed, sindex, sterm, to)
 	} else {
 		m.MsgType = pb.MessageType_MsgAppend
 		m.Index = preLogIndex
@@ -310,6 +325,10 @@ func (r *Raft) sendAppend(to uint64) bool {
 			sendEntry = append(sendEntry, &ents[i])
 		}
 		m.Entries = sendEntry
+		if n := len(m.Entries); n != 0 {
+			last := m.Entries[n-1].Index
+			pr.Next = uint64(last) + 1
+		}
 	}
 	r.send(m)
 	return true
@@ -317,10 +336,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
+	commit := min(r.Prs[to].Match, r.RaftLog.committed)
 	m := pb.Message{
 		To:      to,
 		MsgType: pb.MessageType_MsgHeartbeat,
 		From:    r.id,
+		Commit:  commit,
 	}
 	r.send(m)
 }
@@ -352,7 +373,9 @@ func (r *Raft) bcastHeartbeat() {
 func (r *Raft) advance(rd Ready) {
 	if newApplied := rd.appliedCursor(); newApplied > 0 {
 		oldApplied := r.RaftLog.applied
+		applyEntries := r.RaftLog.nextEnts()
 		r.RaftLog.appliedTo(newApplied)
+		log.Infof("%s %d apply entries: %v, now applyIdx: %d", r.State, r.id, applyEntries, r.RaftLog.applied)
 
 		//  todo project3会用
 		if oldApplied <= r.PendingConfIndex && newApplied >= r.PendingConfIndex && r.State == StateLeader {
@@ -362,7 +385,11 @@ func (r *Raft) advance(rd Ready) {
 	if len(rd.Entries) > 0 {
 		e := rd.Entries[len(rd.Entries)-1]
 		r.RaftLog.stableTo(e.Index, e.Term)
+		stableEntries, _ := r.RaftLog.Entries(r.RaftLog.committed, r.RaftLog.stabled)
+		log.Infof("%s %d , stable entries: %v, commitedidx: %d, stabledIdx: %d", r.State, r.id, stableEntries,
+			r.RaftLog.committed, r.RaftLog.stabled)
 	}
+	r.RaftLog.maybeCompact()
 	if !IsEmptySnap(&rd.Snapshot) {
 
 	}
@@ -691,7 +718,6 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		if m.Reject {
 			log.Debugf("%x received MsgAppResp(rejected, hint: (term %d)) from %x for index %d",
 				r.id, m.LogTerm, m.From, m.Index)
-			// 这里tinykv的msg没有hintIndex，所以需要leader根据logterm进行处理
 			if m.Index == None {
 				return nil
 			}
@@ -701,7 +727,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 					return l.entries[i].Term > m.LogTerm
 				})
 				if sliceIndex > 0 && l.entries[sliceIndex-1].Term == m.LogTerm {
-					m.Index = uint64(sliceIndex) + l.firstIndex
+					m.Index = uint64(sliceIndex) + l.FirstIndex()
 				}
 			}
 			r.Prs[m.From].Next = m.Index
@@ -740,6 +766,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if mlastIndex, ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: mlastIndex})
 	} else {
+		// todo 弄懂append entries的case和部分逻辑
 		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
 			r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
 		if m.Index > r.RaftLog.LastIndex() {
@@ -765,7 +792,41 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
-	// Your Code Here (2C).
+	sindex, sterm := m.Snapshot.Metadata.Index, m.Snapshot.Metadata.Term
+	if r.restore(m.Snapshot) {
+		log.Infof("%x [commit: %d] restored snapshot [index: %d, term: %d]",
+			r.id, r.RaftLog.committed, sindex, sterm)
+		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.LastIndex()})
+	} else {
+		log.Infof("%x [commit: %d] ignored snapshot [index: %d, term: %d]",
+			r.id, r.RaftLog.committed, sindex, sterm)
+		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.committed})
+	}
+}
+
+// restore 从快照中恢复状态机。它恢复日志和状态机的配置。如果此方法返回 false，则忽略快照，因为它已过时或因为错误。
+func (r *Raft) restore(s *pb.Snapshot) bool {
+	if s.Metadata.Index <= r.RaftLog.committed {
+		return false
+	}
+	if r.State != StateFollower {
+		log.Warningf("%x attempted to restore snapshot as leader; should never happen", r.id)
+		r.becomeFollower(r.Term+1, None)
+		return false
+	}
+	if r.RaftLog.matchTerm(s.Metadata.Index, s.Metadata.Term) {
+		log.Infof("%x [commit: %d, lastindex: %d, lastterm: %d] fast-forwarded commit to snapshot [index: %d, "+
+			"term: %d]",
+			r.id, r.RaftLog.committed, r.RaftLog.LastIndex(), r.RaftLog.LastTerm(), s.Metadata.Index, s.Metadata.Term)
+		r.RaftLog.commitTo(s.Metadata.Index)
+		return false
+	}
+	r.Prs = make(map[uint64]*Progress)
+	for _, peer := range s.Metadata.ConfState.Nodes {
+		r.Prs[peer] = &Progress{}
+	}
+	r.RaftLog.restore(s)
+	return true
 }
 
 // addNode add a new node to raft group

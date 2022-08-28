@@ -42,6 +42,52 @@
 
 ### 2 raft_server
 
+#### RaftMessage
+
+| 字段         | 说明                    |
+|------------|-----------------------|
+| region_id       | region_id             |
+| from_peer   | 发送peer                |
+| to_peer   | 接受peer                |
+| message   | Raft message          |
+| region_epoch   | Region更新版本            |
+| is_tombstone   | 表示to_peer已经被删除，应该关闭自己 |
+| start_key   | 起始key                 |
+| end_key   | 结束key                 |
+
+#### RaftLocalState
+
+| 字段         | 说明      |
+|------------|---------|
+| hard_state       | 状态      |
+| last_index   | 最后index |
+| last_term   | 最后term  |
+
+#### RaftApplyState
+用于存储 **Raft 状态机**的持久状态。
+
+| 字段         | 说明                                       |
+|------------|------------------------------------------|
+| applied_index       | 记录状态机应用的索引，确保重启后不会两次应用任何索引。                   |
+| truncated_state   | 记录最后被截断的 raft 日志的索引和期限 |
+
+#### RaftTruncatedState
+Raft 日志压缩的截断状态。
+
+| 字段         | 说明                                       |
+|------------|------------------------------------------|
+| index       | 配置更新版本，当增加或删除peer时自动变化                   |
+| term   | Region更新版本，当split region或merge region时变化 |
+
+#### RegionLocalState
+用于在此 Store 上存储 Region 信息和对应的 Peer 状态。
+
+| 字段         | 说明                                       |
+|------------|------------------------------------------|
+| state       | 配置更新版本，当增加或删除peer时自动变化                   |
+| region   | Region更新版本，当split region或merge region时变化 |
+
+
 #### StoreIdent
 
 | 字段         | 说明                                       |

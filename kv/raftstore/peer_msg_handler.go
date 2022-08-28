@@ -65,10 +65,11 @@ func (d *peerMsgHandler) handleProposal(entry *eraftpb.Entry, handle func(*propo
 				handle(p)
 			}
 		}
+		d.proposals = d.proposals[1:]
 	}
 }
 
-func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+func (d *peerMsgHandler) applyRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	req := msg.Requests[0]
 	key := getRequestKey(req)
 	if key != nil {
@@ -76,15 +77,6 @@ func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.Ra
 		if err != nil {
 			return wb
 		}
-	}
-	// apply to kv
-	switch req.CmdType {
-	case raft_cmdpb.CmdType_Get:
-	case raft_cmdpb.CmdType_Put:
-		wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-	case raft_cmdpb.CmdType_Delete:
-		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
-	case raft_cmdpb.CmdType_Snap:
 	}
 	d.handleProposal(entry, func(p *proposal) {
 		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
@@ -100,26 +92,36 @@ func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.Ra
 			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: value}}}
 			wb = new(engine_util.WriteBatch)
 		case raft_cmdpb.CmdType_Put:
+			wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
 			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}}}
 		case raft_cmdpb.CmdType_Delete:
+			wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
 			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}}}
 		case raft_cmdpb.CmdType_Snap:
-
+			if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+				p.cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
+				return
+			}
+			d.peerStorage.applyState.AppliedIndex = entry.Index
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			wb.WriteToDB(d.peerStorage.Engines.Kv)
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
+			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+			wb = new(engine_util.WriteBatch)
 		}
-		log.Infof("resp: %v", resp)
 		p.cb.Done(resp)
 	})
 	return wb
 }
 
-func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+func (d *peerMsgHandler) apply(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	err := msg.Unmarshal(entry.Data)
 	if err != nil {
 		panic(err)
 	}
 	if len(msg.Requests) > 0 {
-		return d.processRequest(entry, msg, wb)
+		return d.applyRequest(entry, msg, wb)
 	}
 	if msg.AdminRequest != nil {
 		return wb
@@ -127,6 +129,7 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatc
 	return wb
 }
 
+// HandleRaftReady Raft同步完成后，在上层处理rawnode中ready
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
@@ -152,8 +155,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		if len(rd.CommittedEntries) > 0 {
 			oldProposals := d.proposals
 			kvWB := new(engine_util.WriteBatch)
-			for _, entry := range rd.CommittedEntries {
-				kvWB = d.process(&entry, kvWB)
+			// todo 可以异步apply优化
+			for _, entry := range rd.CommittedEntries { // 处理commit entry，向client返回resp后并数据落盘
+				kvWB = d.apply(&entry, kvWB)
 				if d.stopped {
 					return
 				}
@@ -177,8 +181,6 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	// 1. raft内部消息
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
-		log.Infof("handle raftMsg type: %v, regionID: %d, from: %d, to: %d, entries: %v", raftMsg.Message.MsgType,
-			raftMsg.RegionId, raftMsg.FromPeer, raftMsg.ToPeer, raftMsg.Message.Entries)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
@@ -188,6 +190,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 		log.Infof("handle raftCMD type: %v, to: %d, store: %d", raftCMD.Request.Requests[0].CmdType,
 			raftCMD.Request.Header.Peer.Id, raftCMD.Request.Header.Peer.StoreId)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
+	// 3. 计时器消息
 	case message.MsgTypeTick:
 		d.onTick()
 	case message.MsgTypeSplitRegion:

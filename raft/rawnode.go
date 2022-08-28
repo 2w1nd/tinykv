@@ -16,8 +16,6 @@ package raft
 
 import (
 	"errors"
-	"github.com/pingcap-incubator/tinykv/log"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -118,7 +116,6 @@ func (rn *RawNode) Campaign() error {
 // Propose proposes data be appended to the raft log.
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
-	log.Infof("%d propose data: %v", rn.Raft.id, ent)
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		From:    rn.Raft.id,
@@ -193,12 +190,12 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	r := rn.Raft
 	if !r.softState().equal(rn.prevSoftSt) {
-		log.Infof("softSt %v no equal prevSt", r.softState(), rn.prevSoftSt)
+		//log.Infof("softSt %v no equal prevSt", r.softState(), rn.prevSoftSt)
 		return true
 	}
 	// hardState是否发生变化
 	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
-		log.Infof("hardSt need apply: %v", rn.prevHardSt)
+		//log.Infof("hardSt need apply: %v", rn.prevHardSt)
 		return true
 	}
 	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
@@ -206,7 +203,7 @@ func (rn *RawNode) HasReady() bool {
 	}
 	// 是否有消息需要发送？是否有新增的unstable entry和需要被apply的entry
 	if len(r.msgs) > 0 || len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.nextEnts()) > 0 {
-		log.Infof("msg: %v ; unstableEntries: %v ; nextEnts: %v", r.msgs, r.RaftLog.unstableEntries(), r.RaftLog.nextEnts())
+		//log.Infof("msg: %v ;\n unstableEntries: %v ; \nnextEnts: %v", r.msgs, r.RaftLog.unstableEntries(), r.RaftLog.nextEnts())
 		return true
 	}
 	return false
