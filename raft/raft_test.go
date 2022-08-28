@@ -36,7 +36,8 @@ func newMemoryStorageWithEnts(ents []pb.Entry) *MemoryStorage {
 func nextEnts(r *Raft, s *MemoryStorage) (ents []pb.Entry) {
 	// Transfer all unstable entries to "stable" storage.
 	s.Append(r.RaftLog.unstableEntries())
-	r.RaftLog.stabled = r.RaftLog.LastIndex()
+	//r.RaftLog.stabled = r.RaftLog.LastIndex()
+	r.RaftLog.stableTo(r.RaftLog.LastIndex(), r.RaftLog.LastTerm())
 
 	ents = r.RaftLog.nextEnts()
 	r.RaftLog.applied = r.RaftLog.committed
@@ -272,6 +273,7 @@ func TestLogReplication2AB(t *testing.T) {
 	}
 
 	for i, tt := range tests {
+		t.Logf("# %d", i)
 		tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 
 		for _, m := range tt.msgs {

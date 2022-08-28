@@ -267,8 +267,26 @@ func (l *RaftLog) commitTo(tocommit uint64) {
 }
 
 func (l *RaftLog) stableTo(index uint64, term uint64) {
-	// todo ?
-	l.stabled = index
+	gt, err := l.Term(index)
+	if err != nil {
+		return
+	}
+	if gt == term && index >= l.FirstIndex() {
+		l.entries = l.entries[index+1-l.FirstIndex():]
+		l.stabled = index
+		l.shrinkEntriesArray()
+	}
+}
+
+func (l *RaftLog) shrinkEntriesArray() {
+	const lenMultiple = 2
+	if len(l.entries) == 0 {
+		l.entries = nil
+	} else if len(l.entries)*lenMultiple < cap(l.entries) {
+		newEntries := make([]pb.Entry, len(l.entries))
+		copy(newEntries, l.entries)
+		l.entries = newEntries
+	}
 }
 
 func (l *RaftLog) LastTerm() uint64 {

@@ -325,6 +325,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 			sendEntry = append(sendEntry, &ents[i])
 		}
 		m.Entries = sendEntry
+		// 乐观更新
 		if n := len(m.Entries); n != 0 {
 			last := m.Entries[n-1].Index
 			pr.Next = uint64(last) + 1
@@ -427,8 +428,8 @@ func (r *Raft) maybeCommit() bool {
 	}
 	sort.Sort(srt)
 	newCommitIndex := srt[n-(n/2+1)]
-	if newCommitIndex > r.RaftLog.committed {
-		if r.RaftLog.marchLog(r.Term, newCommitIndex) {
+	if newCommitIndex > r.RaftLog.committed { // 如果有半数复制的最高日志条目大于当前提交日志条目
+		if r.RaftLog.marchLog(r.Term, newCommitIndex) { // 保证安全性
 			return r.RaftLog.maybeCommit(newCommitIndex, r.Term)
 		}
 	}
@@ -735,7 +736,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		} else {
 			if pr.Match < m.Index {
 				pr.Match = m.Index
-				pr.Next = m.Index + 1
+				pr.Next = max(pr.Next, m.Index+1)
 			}
 			if r.maybeCommit() {
 				r.bcastAppend()
@@ -769,19 +770,20 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		// todo 弄懂append entries的case和部分逻辑
 		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
 			r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
-		if m.Index > r.RaftLog.LastIndex() {
+		if m.Index > r.RaftLog.LastIndex() { // 1. log不够新，lastIndex+1也就是一致性检查，参与论文leader与b节点比较情况
 			r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.LastIndex() + 1,
 				Reject: true, LogTerm: None})
-			return
+		} else { // 2. 日志比请求，返回响应，加速下次复制日志，参考论文leader与d节点比较情况
+			hintIndex := min(m.Index, r.RaftLog.LastIndex())
+			hintIndex = r.RaftLog.findConflictByTerm(hintIndex, m.LogTerm)
+			hintTerm, err := r.RaftLog.Term(hintIndex)
+			if err != nil {
+				panic(fmt.Sprintf("term(%d) must be valid, but got %v", hintIndex, err))
+			}
+			r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true, LogTerm: hintTerm})
 		}
-		hintIndex := min(m.Index, r.RaftLog.LastIndex())
-		hintIndex = r.RaftLog.findConflictByTerm(hintIndex, m.LogTerm)
-		hintTerm, err := r.RaftLog.Term(hintIndex)
-		if err != nil {
-			panic(fmt.Sprintf("term(%d) must be valid, but got %v", hintIndex, err))
-		}
-		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true, LogTerm: hintTerm})
 	}
+	return
 }
 
 // handleHeartbeat handle Heartbeat RPC request
