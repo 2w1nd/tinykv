@@ -132,33 +132,38 @@ func (l *RaftLog) append(ents ...*pb.Entry) uint64 {
 	if after := ents[0].Index - 1; after < l.committed {
 		log.Panicf("after(%d) is out of range [committed(%d)]", after, l.committed)
 	}
-	// todo 应该还有其他情况
-	for i, ent := range ents {
-		if ent.Index < l.FirstIndex() {
-			continue
-		}
-		if ent.Index <= l.LastIndex() {
-			logTerm, err := l.Term(ent.Index)
-			if err != nil {
-				panic(err)
-			}
-			if logTerm != ent.Term {
-				idx := ent.Index - l.FirstIndex()
-				l.entries[idx] = *ent
-				l.entries = l.entries[:idx+1]
-				l.stabled = min(l.stabled, ent.Index-1)
-			}
-		} else {
-			n := len(ents)
-			for j := i; j < n; j++ {
-				l.entries = append(l.entries, *ents[j])
-			}
-			break
-		}
-	}
+	l.truncateAndAppend(ents)
 	return l.LastIndex()
 }
 
+func (l *RaftLog) truncateAndAppend(ents []*pb.Entry) {
+	after := ents[0].Index
+	if after <= l.committed {
+		log.Panicf("can't append entry(%d) before committed(%d)", after, l.committed)
+		return
+	}
+
+	first := l.FirstIndex()
+	switch {
+	case after-first == uint64(len(l.entries)):
+		// directly append
+		for i := range ents {
+			l.entries = append(l.entries, *ents[i])
+		}
+	default:
+		// 截断 after 后面所有，然后直接append
+		// 符合的 ent 已经在前面的 findConflict 中移除，这里可以直接截断
+		l.entries = l.entries[:after-first]
+		for i := range ents {
+			l.entries = append(l.entries, *ents[i])
+		}
+		if l.stabled >= after {
+			l.stabled = after - 1
+		}
+	}
+}
+
+// 找到第一个冲突的元素
 func (l *RaftLog) findConflict(ents []*pb.Entry) uint64 {
 	for _, ne := range ents {
 		if !l.matchTerm(ne.Index, ne.Term) {
@@ -171,43 +176,47 @@ func (l *RaftLog) findConflict(ents []*pb.Entry) uint64 {
 	return 0
 }
 
-func (l *RaftLog) findConflictByTerm(index uint64, term uint64) uint64 {
+// 找到该term的第一个index
+func (l *RaftLog) findConflictByIndex(index uint64) uint64 {
 	if li := l.LastIndex(); index > li {
 		log.Warningf("index(%d) is out of range [0, lastIndex(%d)] in findConflictByTerm",
 			index, li)
 		return index
 	}
+	term, err := l.Term(index)
+	if err == ErrCompacted {
+		return l.FirstIndex()
+	} else if err != nil {
+		panic(err)
+	}
+	index--
 	for {
 		logTerm, err := l.Term(index)
-		if logTerm <= term || err != nil {
+		if logTerm < term || err != nil {
 			break
 		}
 		index--
 	}
-	return index
+	return index + 1
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) > 0 {
-		return l.entries[l.stabled-l.FirstIndex()+1:]
+		unstableOffset := l.stabled - l.FirstIndex() + 1
+		return l.entries[unstableOffset:]
 	}
 	return nil
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
-	//off := max(l.applied+1, l.firstIndex)
-	//if l.committed+1 > off {
-	//	ents, err := l.slice(off, l.committed+1, l.maxNextEntsSize)
-	//	if err != nil {
-	//		l.logger.Panicf("unexpected error when getting unapplied entries (%v)", err)
-	//	}
-	//	return ents
-	//}
-	//return nil
-	if len(l.entries) > 0 {
-		ents = l.entries[l.applied-l.FirstIndex()+1 : l.committed-l.FirstIndex()+1]
+	off := max(l.applied+1, l.FirstIndex())
+	if l.committed >= off {
+		ents, _, err := l.slice(off, l.committed+1)
+		if err != nil {
+			log.Panicf("unexpected error when getting un applied entries (%v)", err)
+		}
 		return ents
 	}
 	return nil
@@ -218,6 +227,10 @@ func (l *RaftLog) snapshot() (pb.Snapshot, error) {
 		return *l.pendingSnapshot, nil
 	}
 	return l.storage.Snapshot()
+}
+
+func (l *RaftLog) hasPendingSnapshot() bool {
+	return l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index != 0
 }
 
 func (l *RaftLog) FirstIndex() uint64 {
@@ -266,27 +279,8 @@ func (l *RaftLog) commitTo(tocommit uint64) {
 	}
 }
 
-func (l *RaftLog) stableTo(index uint64, term uint64) {
-	gt, err := l.Term(index)
-	if err != nil {
-		return
-	}
-	if gt == term && index >= l.FirstIndex() {
-		l.entries = l.entries[index+1-l.FirstIndex():]
-		l.stabled = index
-		l.shrinkEntriesArray()
-	}
-}
-
-func (l *RaftLog) shrinkEntriesArray() {
-	const lenMultiple = 2
-	if len(l.entries) == 0 {
-		l.entries = nil
-	} else if len(l.entries)*lenMultiple < cap(l.entries) {
-		newEntries := make([]pb.Entry, len(l.entries))
-		copy(newEntries, l.entries)
-		l.entries = newEntries
-	}
+func (l *RaftLog) stableTo(index uint64) {
+	l.stabled = index
 }
 
 func (l *RaftLog) LastTerm() uint64 {
@@ -324,15 +318,34 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	panic(err)
 }
 
-func (l *RaftLog) Entries(lo, hi uint64) ([]pb.Entry, error) {
+func (l *RaftLog) Entries(lo uint64) ([]*pb.Entry, error) {
+	if lo > l.LastIndex() {
+		return nil, nil
+	}
+	_, ents, err := l.slice(lo, l.LastIndex()+1)
+	return ents, err
+}
+
+// get  lo <= ents < hi
+func (l *RaftLog) slice(lo, hi uint64) ([]pb.Entry, []*pb.Entry, error) {
 	err := l.mustCheckOutOfBounds(lo, hi)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if lo >= l.FirstIndex() && hi-l.FirstIndex() <= uint64(len(l.entries)) {
-		return l.entries[lo-l.FirstIndex() : hi-l.FirstIndex()], nil
+	if lo == hi {
+		return nil, nil, nil
 	}
-	return l.storage.Entries(lo, hi)
+
+	offset := l.FirstIndex()
+
+	// [lo, hi)
+	ents := l.entries[lo-offset : hi-offset]
+
+	pEnts := make([]*pb.Entry, len(ents))
+	for index := range ents {
+		pEnts[index] = &ents[index]
+	}
+	return ents, pEnts, nil
 }
 
 // l.firstIndex <= lo <= hi <= l.firstIndex + len(l.entries)
@@ -344,7 +357,6 @@ func (l *RaftLog) mustCheckOutOfBounds(lo, hi uint64) error {
 	if lo < fi {
 		return ErrCompacted
 	}
-
 	length := l.LastIndex() + 1 - fi
 	if hi > fi+length {
 		log.Panicf("slice[%d,%d) out of bound [%d,%d]", lo, hi, fi, l.LastIndex())

@@ -149,12 +149,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// Progress represents a follower’s progress in the view of the leader. Leader maintains
-// progresses of all followers, and sends entries to the follower based on its progress.
-type Progress struct {
-	Match, Next uint64
-}
-
 type Raft struct {
 	id uint64
 
@@ -246,7 +240,7 @@ func newRaft(c *Config) *Raft {
 			r.Prs[peer] = &Progress{Next: lastIndex + 1}
 		}
 	}
-	r.randomizedElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+	r.resetRandomizedElectionTimeout()
 	r.loadState(hs)
 	if c.Applied > 0 {
 		raftLog.appliedTo(c.Applied)
@@ -296,7 +290,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	preLogIndex := pr.Next - 1
 	preLogTerm, errt := r.RaftLog.Term(preLogIndex)
-	ents, erre := r.RaftLog.Entries(preLogIndex+1, r.RaftLog.LastIndex()+1)
+	ents, erre := r.RaftLog.Entries(preLogIndex + 1)
 	if errt != nil || erre != nil {
 		m.MsgType = pb.MessageType_MsgSnapshot
 		snapshot, err := r.RaftLog.snapshot()
@@ -320,16 +314,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		m.Index = preLogIndex
 		m.LogTerm = preLogTerm
 		m.Commit = r.RaftLog.committed
-		var sendEntry []*pb.Entry
-		for i, _ := range ents {
-			sendEntry = append(sendEntry, &ents[i])
-		}
-		m.Entries = sendEntry
-		// 乐观更新
-		if n := len(m.Entries); n != 0 {
-			last := m.Entries[n-1].Index
-			pr.Next = uint64(last) + 1
-		}
+		m.Entries = ents
 	}
 	r.send(m)
 	return true
@@ -362,7 +347,6 @@ func (r *Raft) bcastAppend() {
 
 // bcastHeartbeat 向所有节点发送没有entries的RPC
 func (r *Raft) bcastHeartbeat() {
-	//todo etcd在这里做了一个readonly的处理，没弄懂
 	for peer := range r.Prs {
 		if peer == r.id {
 			continue
@@ -385,15 +369,12 @@ func (r *Raft) advance(rd Ready) {
 	}
 	if len(rd.Entries) > 0 {
 		e := rd.Entries[len(rd.Entries)-1]
-		r.RaftLog.stableTo(e.Index, e.Term)
-		stableEntries, _ := r.RaftLog.Entries(r.RaftLog.committed, r.RaftLog.stabled)
-		log.Infof("%s %d , stable entries: %v, commitedidx: %d, stabledIdx: %d", r.State, r.id, stableEntries,
-			r.RaftLog.committed, r.RaftLog.stabled)
+		r.RaftLog.stableTo(e.Index)
 	}
-	r.RaftLog.maybeCompact()
 	if !IsEmptySnap(&rd.Snapshot) {
 
 	}
+	r.RaftLog.maybeCompact()
 }
 
 func (r *Raft) reset(term uint64) {
@@ -442,15 +423,11 @@ func (r *Raft) appendEntry(es ...*pb.Entry) (accepted bool) {
 		es[i].Term = r.Term
 		es[i].Index = li + 1 + uint64(i)
 	}
-	// todo
 	li = r.RaftLog.append(es...)
 	// update progress
-	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	r.Prs[r.id].Next = max(r.Prs[r.id].Next, li+1)
+	r.Prs[r.id].MaybeUpdate(li)
 	// commit
-	if len(r.Prs) == 1 {
-		r.maybeCommit()
-	}
+	r.maybeCommit()
 	return true
 }
 
@@ -521,8 +498,6 @@ func (r *Raft) becomeLeader() {
 	r.Lead = r.id
 	r.State = StateLeader
 
-	// todo 处理progress
-
 	// todo 为之后的配置更改做准备
 	r.PendingConfIndex = r.RaftLog.LastIndex()
 
@@ -538,9 +513,25 @@ func (r *Raft) hup() {
 		log.Debugf("%x ignoring MsgHup because already leader", r.id)
 		return
 	}
-	// todo 一些扩展的判断
+	if !r.promotable() {
+		log.Warningf("%x is unPromotable and can not campaign", r.id)
+		return
+	}
 	log.Infof("%x is starting a new election at term %d", r.id, r.Term)
 	r.campaign()
+}
+
+func (r *Raft) promotable() bool {
+	pr := r.Prs[r.id]
+	if pr == nil {
+		log.Infof("%x is unPromotable because not in progress list", r.id)
+		return false
+	}
+	if r.RaftLog.hasPendingSnapshot() {
+		log.Infof("%x is unPromotable because not has pending snapshot", r.id)
+		return false
+	}
+	return true
 }
 
 func (r *Raft) campaign() {
@@ -719,27 +710,18 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		if m.Reject {
 			log.Debugf("%x received MsgAppResp(rejected, hint: (term %d)) from %x for index %d",
 				r.id, m.LogTerm, m.From, m.Index)
-			if m.Index == None {
-				return nil
+			nextProbeIdx := r.RaftLog.findConflictByIndex(m.Index)
+			if pr.MaybeDecrTo(m.Index, nextProbeIdx) {
+				log.Debugf("%x decreased next index progress of %x to [%d]", r.id, m.From, pr.Next)
+				r.sendAppend(m.From)
 			}
-			if m.LogTerm != None {
-				l := r.RaftLog
-				sliceIndex := sort.Search(len(l.entries), func(i int) bool {
-					return l.entries[i].Term > m.LogTerm
-				})
-				if sliceIndex > 0 && l.entries[sliceIndex-1].Term == m.LogTerm {
-					m.Index = uint64(sliceIndex) + l.FirstIndex()
-				}
-			}
-			r.Prs[m.From].Next = m.Index
-			r.sendAppend(m.From)
 		} else {
-			if pr.Match < m.Index {
-				pr.Match = m.Index
-				pr.Next = max(pr.Next, m.Index+1)
-			}
-			if r.maybeCommit() {
-				r.bcastAppend()
+			if pr.MaybeUpdate(m.Index) {
+				if r.maybeCommit() {
+					r.bcastAppend()
+				} else if pr.Match < r.RaftLog.LastIndex() {
+					r.sendAppend(m.From)
+				}
 			}
 			if m.From == r.leadTransferee && pr.Match == r.RaftLog.LastIndex() {
 				log.Infof("%x sent MsgTimeoutNow to %x after received MsgAppResp", r.id, m.From)
@@ -747,7 +729,6 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			}
 		}
 	case pb.MessageType_MsgHeartbeatResponse:
-		// todo
 		if pr.Match < r.RaftLog.LastIndex() {
 			r.sendAppend(m.From)
 		}
@@ -767,21 +748,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if mlastIndex, ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: mlastIndex})
 	} else {
-		// todo 弄懂append entries的case和部分逻辑
 		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
 			r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
-		if m.Index > r.RaftLog.LastIndex() { // 1. log不够新，lastIndex+1也就是一致性检查，参与论文leader与b节点比较情况
-			r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.LastIndex() + 1,
-				Reject: true, LogTerm: None})
-		} else { // 2. 日志比请求，返回响应，加速下次复制日志，参考论文leader与d节点比较情况
-			hintIndex := min(m.Index, r.RaftLog.LastIndex())
-			hintIndex = r.RaftLog.findConflictByTerm(hintIndex, m.LogTerm)
-			hintTerm, err := r.RaftLog.Term(hintIndex)
-			if err != nil {
-				panic(fmt.Sprintf("term(%d) must be valid, but got %v", hintIndex, err))
-			}
-			r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true, LogTerm: hintTerm})
-		}
+		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true})
 	}
 	return
 }
