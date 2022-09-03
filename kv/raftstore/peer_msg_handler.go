@@ -136,24 +136,89 @@ func (d *peerMsgHandler) applyAdminRequest(entry *eraftpb.Entry, msg *raft_cmdpb
 			d.ScheduleCompactLog(applySt.TruncatedState.Index)
 		}
 	case raft_cmdpb.AdminCmdType_TransferLeader:
-	case raft_cmdpb.AdminCmdType_ChangePeer:
 	case raft_cmdpb.AdminCmdType_Split:
 	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	}
 	return wb
 }
 
-func (d *peerMsgHandler) apply(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfChange, wb *engine_util.WriteBatch) {
 	msg := &raft_cmdpb.RaftCmdRequest{}
-	err := msg.Unmarshal(entry.Data)
-	if err != nil {
-		panic(err)
+	err := msg.Unmarshal(cc.Context)
+	region := d.Region()
+	err = util.CheckRegionEpoch(msg, region, true)
+	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
+		d.handleProposal(entry, func(p *proposal) {
+			p.cb.Done(ErrResp(errEpochNotMatching))
+		})
+		return
 	}
-	if len(msg.Requests) > 0 {
-		return d.applyRequest(entry, msg, wb)
+	targetPeer := msg.AdminRequest.ChangePeer.Peer
+	peerIndex := d.findPeerIndex(region, cc.NodeId)
+	switch cc.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+		if peerIndex != -1 {
+			return
+		}
+		region.Peers = append(region.Peers, targetPeer)
+		d.insertPeerCache(targetPeer)
+		log.Infof("%s add node %d", d.Tag, targetPeer.Id)
+	case eraftpb.ConfChangeType_RemoveNode:
+		if peerIndex == -1 {
+			return
+		}
+		if d.peer.PeerId() == cc.NodeId { // 自己则直接删除
+			d.destroyPeer()
+			return
+		}
+		region.Peers = append(region.Peers[:peerIndex], region.Peers[peerIndex+1:]...)
+		d.removePeerCache(targetPeer.Id)
+		log.Infof("%s remove node %d", d.Tag, targetPeer.Id)
 	}
-	if msg.AdminRequest != nil {
-		return d.applyAdminRequest(entry, msg, wb)
+	region.RegionEpoch.ConfVer++
+	meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+	d.RaftGroup.ApplyConfChange(*cc) // 修改raft层的信息，propose时仅仅将该配置同步日志，并未使用
+	d.handleProposal(entry, func(p *proposal) {
+		p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{},
+			},
+		})
+	})
+}
+
+func (d *peerMsgHandler) findPeerIndex(region *metapb.Region, peerId uint64) int {
+	for i, p := range region.Peers {
+		if p.Id == peerId {
+			return i
+		}
+	}
+	return -1
+}
+
+func (d *peerMsgHandler) apply(entry *eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	switch entry.EntryType {
+	case eraftpb.EntryType_EntryConfChange:
+		cc := &eraftpb.ConfChange{}
+		err := cc.Unmarshal(entry.Data)
+		if err != nil {
+			panic(err)
+		}
+		d.applyConfChange(entry, cc, wb)
+	case eraftpb.EntryType_EntryNormal:
+		msg := &raft_cmdpb.RaftCmdRequest{}
+		err := msg.Unmarshal(entry.Data)
+		if err != nil {
+			panic(err)
+		}
+		if len(msg.Requests) > 0 {
+			return d.applyRequest(entry, msg, wb)
+		}
+		if msg.AdminRequest != nil {
+			return d.applyAdminRequest(entry, msg, wb)
+		}
 	}
 	return wb
 }
@@ -214,8 +279,8 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	// 2. client消息
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
-		log.Infof("handle raftCMD type: %v, to: %d, store: %d", raftCMD.Request.Requests[0].CmdType,
-			raftCMD.Request.Header.Peer.Id, raftCMD.Request.Header.Peer.StoreId)
+		//log.Infof("handle raftCMD type: %v, to: %d, store: %d", raftCMD.Request.Requests[0].CmdType,
+		//	raftCMD.Request.Header.Peer.Id, raftCMD.Request.Header.Peer.StoreId)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	// 3. 计时器消息
 	case message.MsgTypeTick:
@@ -307,7 +372,25 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 		}
 	case raft_cmdpb.AdminCmdType_TransferLeader:
 		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		cb.Done(&raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+				TransferLeader: &raft_cmdpb.TransferLeaderResponse{},
+			},
+		})
 	case raft_cmdpb.AdminCmdType_ChangePeer:
+		var cc eraftpb.ConfChange
+		m := msg.AdminRequest.ChangePeer
+		cc.ChangeType = m.ChangeType
+		cc.NodeId = m.Peer.Id
+		ctx, err := msg.Marshal() // msg也要同步，不然后面获取不到Peer
+		cc.Context = ctx
+		err = d.RaftGroup.ProposeConfChange(cc)
+		if err != nil {
+			log.Errorf("propose adminCmdType_ChangePeer error: %v", err)
+			return
+		}
 	case raft_cmdpb.AdminCmdType_Split:
 	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	}
