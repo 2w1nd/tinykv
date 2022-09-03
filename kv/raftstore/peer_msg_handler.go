@@ -135,6 +135,10 @@ func (d *peerMsgHandler) applyAdminRequest(entry *eraftpb.Entry, msg *raft_cmdpb
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), applySt)
 			d.ScheduleCompactLog(applySt.TruncatedState.Index)
 		}
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_Split:
+	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	}
 	return wb
 }
@@ -301,6 +305,11 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 			log.Errorf("propose adminCmdType_compactLog error: %v", err)
 			return
 		}
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_Split:
+	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	}
 }
 

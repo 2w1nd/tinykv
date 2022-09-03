@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -212,6 +213,12 @@ type Raft struct {
 
 // newRaft return a raft peer with the given config
 func newRaft(c *Config) *Raft {
+	IsEnableLog := os.Getenv("kv_debug")
+	if IsEnableLog != "false" {
+		log.SetLevel(log.LOG_LEVEL_DEBUG)
+	} else {
+		log.SetLevel(log.LOG_LEVEL_WARN)
+	}
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
@@ -633,11 +640,11 @@ func (r *Raft) stepFollower(m pb.Message) error {
 			log.Infof("%x no leader at term %d; dropping leader transfer msg", r.id, r.Term)
 			return nil
 		}
-		m.To = r.Lead
+		m.To = r.Lead // 转发优化
 		r.send(m)
 	case pb.MessageType_MsgTimeoutNow:
 		log.Infof("%x [term %d] received MsgTimeoutNow from %x and starts an election to get leadership.", r.id, r.Term, m.From)
-		r.hup()
+		r.hup() // 收到timeout后，立即开始选举
 	}
 	return nil
 }
@@ -688,9 +695,21 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			log.Debugf("%x [term %d] transfer leadership to %x is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
 			return ErrProposalDropped
 		}
-		//for i := range m.Entries {
-		// todo 一些对于配置更新的处理，后续完成
-		//}
+		for i := range m.Entries {
+			e := m.Entries[i]
+			var c pb.ConfChange
+			if e.EntryType == pb.EntryType_EntryConfChange {
+				if err := c.Unmarshal(e.Data); err != nil {
+					panic(err)
+				}
+				alreadyPending := r.PendingConfIndex > r.RaftLog.applied
+				if alreadyPending {
+					m.Entries[i] = &pb.Entry{EntryType: pb.EntryType_EntryNormal}
+				} else {
+					r.PendingConfIndex = r.RaftLog.LastIndex() + uint64(i) + 1
+				}
+			}
+		}
 		if !r.appendEntry(m.Entries...) {
 			return ErrProposalDropped
 		}
@@ -730,7 +749,33 @@ func (r *Raft) stepLeader(m pb.Message) error {
 			r.sendAppend(m.From)
 		}
 	case pb.MessageType_MsgTransferLeader:
-
+		leadTransferee := m.From
+		lastLeadTransferee := r.leadTransferee
+		if lastLeadTransferee != None {
+			if lastLeadTransferee == leadTransferee { // from已经在迁移过程中
+				log.Infof("%x [term %d] transfer leadership to %x is in progress, ignores request to same node %x",
+					r.id, r.Term, leadTransferee, leadTransferee)
+				return nil
+			}
+			r.abortLeaderTransfer()
+			log.Infof("%x [term %d] abort previous transferring leadership to %x", r.id, r.Term, lastLeadTransferee)
+		}
+		if leadTransferee == r.id { // to已经是leader
+			log.Debugf("%x is already leader. Ignored transferring leadership to self", r.id)
+			return nil
+		}
+		// Transfer leadership to third party.
+		log.Infof("%x [term %d] starts to transfer leadership to %x", r.id, r.Term, leadTransferee)
+		// 转移领导应在一次选举超时内完成，因此重置 r.electionElapsed
+		r.electionElapsed = 0
+		r.leadTransferee = leadTransferee
+		if pr.Match == r.RaftLog.LastIndex() {
+			r.sendTimeoutNow(leadTransferee)
+			log.Infof("%x sends MsgTimeoutNow to %x immediately as %x already has up-to-date log", r.id,
+				leadTransferee, leadTransferee)
+		} else {
+			r.sendAppend(leadTransferee)
+		}
 	}
 	return nil
 }
@@ -745,8 +790,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if mlastIndex, ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: mlastIndex})
 	} else {
-		//log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
-		//	r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
+		term, _ := r.RaftLog.Term(m.Index)
+		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
+			r.id, term, m.Index, m.LogTerm, m.Index, m.From)
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true})
 	}
 	return
@@ -800,11 +846,25 @@ func (r *Raft) restore(s *pb.Snapshot) bool {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	for p := range r.Prs {
+		if p == id {
+			return
+		}
+	}
+	r.Prs[id] = &Progress{Next: 1}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+	}
+	if id != r.id && r.State == StateLeader {
+		if r.maybeCommit() {
+			r.bcastAppend()
+		}
+	}
 }
 
 func (r *Raft) loadState(state pb.HardState) {
