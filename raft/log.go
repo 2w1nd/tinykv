@@ -54,6 +54,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	dummyIndex uint64 // firstIndex = dummyIndex + 1
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -82,6 +83,7 @@ func newLog(storage Storage) *RaftLog {
 		applied:         firstIndex - 1,
 		stabled:         lastIndex,
 		pendingSnapshot: nil,
+		dummyIndex:      firstIndex - 1,
 	}
 }
 
@@ -94,13 +96,11 @@ func (l *RaftLog) String() string {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	first, _ := l.storage.FirstIndex()
-	if first > l.FirstIndex() {
-		if len(l.entries) > 0 {
-			entries := l.entries[first-l.FirstIndex():]
-			l.entries = make([]pb.Entry, len(entries))
-			copy(l.entries, entries)
-		}
-		l.pendingSnapshot.Metadata.Index = first
+	if first > l.FirstIndex() && len(l.entries) > 0 {
+		entries := l.entries[first-l.FirstIndex():]
+		l.entries = make([]pb.Entry, len(entries))
+		copy(l.entries, entries)
+		l.dummyIndex = first - 1
 	}
 }
 
@@ -186,7 +186,7 @@ func (l *RaftLog) findConflictByIndex(index uint64) uint64 {
 	}
 	term, err := l.Term(index)
 	if err == ErrCompacted {
-		return l.FirstIndex() - 1
+		return l.dummyIndex
 	} else if err != nil {
 		panic(err)
 	}
@@ -240,14 +240,15 @@ func (l *RaftLog) hasPendingSnapshot() bool {
 }
 
 func (l *RaftLog) FirstIndex() uint64 {
-	if l.pendingSnapshot != nil {
-		return l.pendingSnapshot.Metadata.Index + 1
-	}
-	index, err := l.storage.FirstIndex()
-	if err != nil {
-		panic(err)
-	}
-	return index
+	//if l.pendingSnapshot != nil {
+	//	return l.pendingSnapshot.Metadata.Index + 1
+	//}
+	//idx, err := l.storage.FirstIndex()
+	//if err != nil {
+	//	panic(err)
+	//}
+	//return max(l.dummyIndex+1, idx)
+	return l.dummyIndex + 1
 }
 
 // LastIndex return the last index of the log entries
@@ -299,7 +300,7 @@ func (l *RaftLog) stableSnapTo(i uint64) {
 			l.entries = make([]pb.Entry, len(newEntries))
 			copy(l.entries, newEntries)
 		}
-		l.pendingSnapshot.Metadata.Index = i
+		l.dummyIndex = i
 	}
 }
 
@@ -313,29 +314,32 @@ func (l *RaftLog) LastTerm() uint64 {
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	dummyIndex := l.FirstIndex() - 1
-	if i < dummyIndex || i > l.LastIndex() {
+	if i == 0 {
 		return 0, nil
 	}
-	if len(l.entries) > 0 && i >= l.FirstIndex() {
-		return l.entries[i-l.FirstIndex()].Term, nil
+
+	if i < l.dummyIndex {
+		return 0, ErrCompacted
 	}
-	t, err := l.storage.Term(i)
-	if err == nil {
-		return t, nil
+
+	if i > l.LastIndex() {
+		return 0, ErrUnavailable
 	}
-	if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
-		if i == l.pendingSnapshot.Metadata.Index {
-			err = nil
-			return l.pendingSnapshot.Metadata.Term, err
-		} else if i < l.pendingSnapshot.Metadata.Index {
-			err = ErrCompacted
+
+	if l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index == i {
+		return l.pendingSnapshot.Metadata.Term, nil
+	}
+
+	if i == l.dummyIndex {
+		term, err := l.storage.Term(i)
+		if err != nil {
+			return 0, err
 		}
+		return term, nil
 	}
-	if err == ErrCompacted || err == ErrUnavailable {
-		return 0, err
-	}
-	panic(err)
+
+	offset := l.FirstIndex()
+	return l.entries[i-offset].Term, nil
 }
 
 func (l *RaftLog) Entries(lo uint64) ([]*pb.Entry, error) {
@@ -374,7 +378,7 @@ func (l *RaftLog) mustCheckOutOfBounds(lo, hi uint64) error {
 		log.Panicf("invalid slice %d > %d", lo, hi)
 	}
 	fi := l.FirstIndex()
-	if lo < fi {
+	if lo < fi { // 早于快照的index，直接发送快照即可
 		return ErrCompacted
 	}
 	length := l.LastIndex() + 1 - fi
@@ -416,6 +420,7 @@ func (l *RaftLog) restore(s *pb.Snapshot) {
 	l.committed = s.Metadata.Index
 	l.appliedTo(s.Metadata.Index)
 	l.stableTo(s.Metadata.Index)
+	l.dummyIndex = s.Metadata.Index
 	l.pendingSnapshot = s
 }
 

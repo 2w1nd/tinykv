@@ -288,9 +288,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 	preLogIndex := pr.Next - 1
 	preLogTerm, errt := r.RaftLog.Term(preLogIndex)
 	ents, erre := r.RaftLog.Entries(preLogIndex + 1)
-	if errt != nil || erre != nil {
+	if errt == ErrCompacted || erre == ErrCompacted {
+		errt = nil
+		erre = nil
 		m.MsgType = pb.MessageType_MsgSnapshot
-		snapshot, err := r.RaftLog.snapshot()
+		snapshot, err := r.RaftLog.storage.Snapshot()
 		if err != nil {
 			if err == ErrSnapshotTemporarilyUnavailable {
 				log.Debugf("%x failed to send snapshot to %x because snapshot is temporarily unavailable", r.id, to)
@@ -298,9 +300,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 			}
 			panic(err)
 		}
-		if IsEmptySnap(&snapshot) {
-			panic("need non-empty snapshot")
-		}
+		r.Prs[to].Next = snapshot.Metadata.Index + 1
 		m.Snapshot = &snapshot
 		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
 		log.Debugf("%x [firstindex: %d, commit: %d] sent snapshot[index: %d, term: %d] to %x",
@@ -407,9 +407,9 @@ func (r *Raft) maybeCommit() bool {
 	sort.Sort(srt)
 	newCommitIndex := srt[n-(n/2+1)]
 	if newCommitIndex > r.RaftLog.committed { // 如果有半数复制的最高日志条目大于当前提交日志条目
-		if r.RaftLog.marchLog(r.Term, newCommitIndex) { // 保证安全性
-			return r.RaftLog.maybeCommit(newCommitIndex, r.Term)
-		}
+		//if r.RaftLog.marchLog(r.Term, newCommitIndex) { // 保证安全性
+		return r.RaftLog.maybeCommit(newCommitIndex, r.Term)
+		//}
 	}
 	return false
 }
@@ -745,8 +745,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if mlastIndex, ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: mlastIndex})
 	} else {
-		log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
-			r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
+		//log.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
+		//	r.id, r.RaftLog.zeroTermOnErrCompacted(r.RaftLog.Term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index, Reject: true})
 	}
 	return
