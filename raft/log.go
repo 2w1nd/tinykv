@@ -76,11 +76,12 @@ func newLog(storage Storage) *RaftLog {
 		panic(err)
 	}
 	return &RaftLog{
-		storage:   storage,
-		entries:   entries,
-		committed: hardState.Commit,
-		applied:   firstIndex - 1,
-		stabled:   lastIndex,
+		storage:         storage,
+		entries:         entries,
+		committed:       hardState.Commit,
+		applied:         firstIndex - 1,
+		stabled:         lastIndex,
+		pendingSnapshot: nil,
 	}
 }
 
@@ -185,7 +186,7 @@ func (l *RaftLog) findConflictByIndex(index uint64) uint64 {
 	}
 	term, err := l.Term(index)
 	if err == ErrCompacted {
-		return l.FirstIndex()
+		return l.FirstIndex() - 1
 	} else if err != nil {
 		panic(err)
 	}
@@ -220,6 +221,11 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 		return ents
 	}
 	return nil
+}
+
+func (l *RaftLog) hasNextEnts() bool {
+	off := max(l.applied+1, l.FirstIndex())
+	return l.committed+1 > off
 }
 
 func (l *RaftLog) snapshot() (pb.Snapshot, error) {
@@ -281,6 +287,20 @@ func (l *RaftLog) commitTo(tocommit uint64) {
 
 func (l *RaftLog) stableTo(index uint64) {
 	l.stabled = index
+}
+
+func (l *RaftLog) stableSnapTo(i uint64) {
+	firstIndex := l.FirstIndex()
+	if i >= firstIndex {
+		// can snapshot
+		if len(l.entries) > 0 {
+			// truncate entries
+			newEntries := l.entries[i-firstIndex+1:]
+			l.entries = make([]pb.Entry, len(newEntries))
+			copy(l.entries, newEntries)
+		}
+		l.pendingSnapshot.Metadata.Index = i
+	}
 }
 
 func (l *RaftLog) LastTerm() uint64 {
@@ -394,8 +414,8 @@ func (l *RaftLog) restore(s *pb.Snapshot) {
 	log.Infof("log [%s] starts to restore snapshot [index: %d, term: %d]", l, s.Metadata.Index, s.Metadata.Term)
 	l.entries = nil
 	l.committed = s.Metadata.Index
-	l.applied = s.Metadata.Index
-	l.stabled = s.Metadata.Index
+	l.appliedTo(s.Metadata.Index)
+	l.stableTo(s.Metadata.Index)
 	l.pendingSnapshot = s
 }
 

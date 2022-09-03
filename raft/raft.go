@@ -285,16 +285,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 	m := pb.Message{}
 	m.To, m.From = to, r.id
 
-	if r.RaftLog.LastIndex() < pr.Next-1 {
-		return true
-	}
 	preLogIndex := pr.Next - 1
 	preLogTerm, errt := r.RaftLog.Term(preLogIndex)
 	ents, erre := r.RaftLog.Entries(preLogIndex + 1)
 	if errt != nil || erre != nil {
 		m.MsgType = pb.MessageType_MsgSnapshot
 		snapshot, err := r.RaftLog.snapshot()
-		m.Snapshot = &snapshot
 		if err != nil {
 			if err == ErrSnapshotTemporarilyUnavailable {
 				log.Debugf("%x failed to send snapshot to %x because snapshot is temporarily unavailable", r.id, to)
@@ -372,7 +368,8 @@ func (r *Raft) advance(rd Ready) {
 		r.RaftLog.stableTo(e.Index)
 	}
 	if !IsEmptySnap(&rd.Snapshot) {
-
+		r.RaftLog.stableSnapTo(rd.Snapshot.Metadata.Index)
+		r.RaftLog.pendingSnapshot = nil
 	}
 	r.RaftLog.maybeCompact()
 }

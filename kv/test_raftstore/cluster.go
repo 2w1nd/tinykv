@@ -199,7 +199,6 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 			SleepMS(100)
 			continue
 		}
-		//log.Infof("resp:[%v]", resp)
 		return resp, txn
 	}
 	panic("request timeout")
@@ -223,7 +222,6 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 			panic(fmt.Sprintf("can't get leader of region %d", regionID))
 		}
 		request.Header.Peer = leader
-		log.Infof("request 111")
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)

@@ -1,7 +1,6 @@
 package raftstore
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
 	"sync"
 	"sync/atomic"
 
@@ -100,7 +99,6 @@ func (r *RaftstoreRouter) SendRaftCommand(req *raft_cmdpb.RaftCmdRequest, cb *me
 		Request:  req,
 		Callback: cb,
 	}
-	log.Infof("SendRaftCommand")
 	regionID := req.Header.RegionId
 	return r.router.send(regionID, message.NewPeerMsg(message.MsgTypeRaftCmd, regionID, cmd))
 }
