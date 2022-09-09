@@ -148,18 +148,18 @@ func (c *NodeSimulator) RunStore(cfg *config.Config, engine *engine_util.Engines
 	c.Lock()
 	defer c.Unlock()
 
-	raftRouter, raftSystem := raftstore.CreateRaftstore(cfg)
-	snapManager := snap.NewSnapManager(cfg.DBPath + "/snap")
-	node := raftstore.NewNode(raftSystem, cfg, c.schedulerClient)
+	raftRouter, raftSystem := raftstore.CreateRaftstore(cfg)      // 创建raftStorage，返回router和其本身
+	snapManager := snap.NewSnapManager(cfg.DBPath + "/snap")      // 创建snapManager
+	node := raftstore.NewNode(raftSystem, cfg, c.schedulerClient) // 创建一个node，我理解这是raftStorage的上层，用于控制其启动和保存部分store信息的
 
-	err := node.Start(ctx, engine, c.trans, snapManager)
+	err := node.Start(ctx, engine, c.trans, snapManager) // 启动store主要函数
 	if err != nil {
 		return err
 	}
 
 	storeID := node.GetStoreID()
 	c.nodes[storeID] = node
-	c.trans.AddStore(storeID, raftRouter, snapManager)
+	c.trans.AddStore(storeID, raftRouter, snapManager) // 注册该store
 
 	return nil
 }

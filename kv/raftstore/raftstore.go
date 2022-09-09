@@ -227,7 +227,7 @@ func (bs *Raftstore) start(
 		return err
 	}
 	wg := new(sync.WaitGroup)
-	bs.workers = &workers{
+	bs.workers = &workers{ // 初始化worker
 		splitCheckWorker: worker.NewWorker("split-check", wg),
 		regionWorker:     worker.NewWorker("snapshot-worker", wg),
 		raftLogGCWorker:  worker.NewWorker("raft-gc-worker", wg),
@@ -249,7 +249,7 @@ func (bs *Raftstore) start(
 		schedulerClient:      schedulerClient,
 		tickDriverSender:     bs.tickDriver.newRegionCh,
 	}
-	regionPeers, err := bs.loadPeers()
+	regionPeers, err := bs.loadPeers() // 启动peer
 	if err != nil {
 		return err
 	}
@@ -257,7 +257,7 @@ func (bs *Raftstore) start(
 	for _, peer := range regionPeers {
 		bs.router.register(peer)
 	}
-	bs.startWorkers(regionPeers)
+	bs.startWorkers(regionPeers) // 启动worker
 	return nil
 }
 

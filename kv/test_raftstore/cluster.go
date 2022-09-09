@@ -57,6 +57,7 @@ func (c *Cluster) Start() {
 	ctx := context.TODO()
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
+	// cluster是store的总和，该循环为每个store分配一个engines，也就是底层存储引擎
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
 		dbPath, err := ioutil.TempDir("./tmp", "test-raftstore")
 		if err != nil {
@@ -99,15 +100,17 @@ func (c *Cluster) Start() {
 		RegionEpoch: regionEpoch,
 	}
 
+	// 每个store启动1个peer，并添加同一region中
 	for storeID, engine := range c.engines {
 		peer := NewPeer(storeID, storeID)
 		firstRegion.Peers = append(firstRegion.Peers, peer)
-		err := raftstore.BootstrapStore(engine, clusterID, storeID)
+		err := raftstore.BootstrapStore(engine, clusterID, storeID) // 启动store，主要是设置元信息(storeId, clusterId, key?)
 		if err != nil {
 			panic(err)
 		}
 	}
 
+	// 设置该region的一些重要元信息（RaftApplyState，RaftLocalState）
 	for _, engine := range c.engines {
 		raftstore.PrepareBootstrapCluster(engine, firstRegion)
 	}
@@ -116,7 +119,7 @@ func (c *Cluster) Start() {
 		Id:      1,
 		Address: "",
 	}
-	resp, err := c.schedulerClient.Bootstrap(context.TODO(), store)
+	resp, err := c.schedulerClient.Bootstrap(context.TODO(), store) // 将store注册到Scheduler中？感觉和下面的循环重复了
 	if err != nil {
 		panic(err)
 	}
@@ -129,14 +132,14 @@ func (c *Cluster) Start() {
 			Id:      storeID,
 			Address: "",
 		}
-		err := c.schedulerClient.PutStore(context.TODO(), store)
+		err := c.schedulerClient.PutStore(context.TODO(), store) //
 		if err != nil {
 			panic(err)
 		}
 		raftstore.ClearPrepareBootstrapState(engine)
 	}
 
-	for storeID := range c.engines {
+	for storeID := range c.engines { // <--最重要的启动流程，会将每个store中的server相应的处理协程都启动起来
 		c.StartServer(storeID)
 	}
 }

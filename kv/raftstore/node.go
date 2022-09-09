@@ -43,7 +43,7 @@ func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Tr
 	if err != nil {
 		return err
 	}
-	if storeID == util.InvalidID {
+	if storeID == util.InvalidID { // 校验storeID是否正确
 		storeID, err = n.bootstrapStore(ctx, engines)
 	}
 	if err != nil {
@@ -51,7 +51,7 @@ func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Tr
 	}
 	n.store.Id = storeID
 
-	firstRegion, err := n.checkOrPrepareBootstrapCluster(ctx, engines, storeID)
+	firstRegion, err := n.checkOrPrepareBootstrapCluster(ctx, engines, storeID) // 判断region是否创建了
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func (n *Node) Start(ctx context.Context, engines *engine_util.Engines, trans Tr
 		}
 	}
 
-	err = n.schedulerClient.PutStore(ctx, n.store)
+	err = n.schedulerClient.PutStore(ctx, n.store) // put store?之前不是put了吗
 	if err != nil {
 		return err
 	}

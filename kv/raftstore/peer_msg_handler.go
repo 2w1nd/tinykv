@@ -1,6 +1,7 @@
 package raftstore
 
 import (
+	"encoding/hex"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
@@ -56,16 +57,37 @@ func getRequestKey(req *raft_cmdpb.Request) []byte {
 }
 
 func (d *peerMsgHandler) handleProposal(entry *eraftpb.Entry, handle func(*proposal)) {
-	if len(d.proposals) > 0 {
-		p := d.proposals[0]
-		if p.index == entry.Index {
-			if p.term != entry.Term {
-				NotifyStaleReq(entry.Term, p.cb)
-			} else {
-				handle(p)
-			}
+	for len(d.proposals) > 0 {
+		proposal := d.proposals[0]
+		if entry.Term < proposal.term {
+			return
 		}
-		d.proposals = d.proposals[1:]
+
+		if entry.Term > proposal.term {
+			log.Infof("%s: Committed entry[%d-%d] has larger term than proposal[%d-%d], reply stale", d.Tag, entry.Index, entry.Term, proposal.index, proposal.term)
+			proposal.cb.Done(ErrRespStaleCommand(proposal.term))
+			d.proposals = d.proposals[1:]
+			continue
+		}
+
+		if entry.Term == proposal.term && entry.Index < proposal.index {
+			return
+		}
+
+		if entry.Term == proposal.term && entry.Index > proposal.index {
+			log.Infof("%s: Committed entry[%d-%d] has larger index than proposal[%d-%d], reply stale", d.Tag, entry.Index, entry.Term, proposal.index, proposal.term)
+			proposal.cb.Done(ErrRespStaleCommand(proposal.term))
+			d.proposals = d.proposals[1:]
+			continue
+		}
+
+		if entry.Index == proposal.index && entry.Term == proposal.term {
+			handle(proposal)
+			d.proposals = d.proposals[1:]
+			return
+		}
+
+		panic("This should not happen.")
 	}
 }
 
@@ -135,8 +157,88 @@ func (d *peerMsgHandler) applyAdminRequest(entry *eraftpb.Entry, msg *raft_cmdpb
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), applySt)
 			d.ScheduleCompactLog(applySt.TruncatedState.Index)
 		}
-	case raft_cmdpb.AdminCmdType_TransferLeader:
 	case raft_cmdpb.AdminCmdType_Split:
+		split := req.Split
+		if d.IsLeader() {
+			log.Infof("%s start to commit split region request in store %d, split key is %v, msg %v", d.Tag,
+				d.ctx.store.Id, hex.EncodeToString(split.SplitKey), msg)
+		}
+		// 1. 检查region epoch是否最新，key是否在当前region中
+		err := util.CheckRegionEpoch(msg, d.Region(), true)
+		if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
+			d.handleProposal(entry, func(p *proposal) {
+				p.cb.Done(ErrResp(errEpochNotMatching))
+			})
+			return wb
+		}
+		err = util.CheckKeyInRegion(split.GetSplitKey(), d.Region())
+		if err != nil {
+			d.handleProposal(entry, func(p *proposal) {
+				p.cb.Done(ErrResp(err))
+			})
+			return wb
+		}
+		// 2. 修改新旧region的相关信息
+		originRegion := d.Region()
+		oldRegion := new(metapb.Region)
+		if err := util.CloneMsg(originRegion, oldRegion); err != nil {
+			panic(err)
+		}
+		newRegion := new(metapb.Region)
+		if err := util.CloneMsg(originRegion, newRegion); err != nil {
+			panic(err)
+		}
+		newRegion.RegionEpoch.Version++
+		newRegion.Id = split.NewRegionId
+		newRegion.StartKey = split.SplitKey
+		newRegion.EndKey = oldRegion.EndKey
+		newPeers := make([]*metapb.Peer, len(split.NewPeerIds))
+		for i, peer := range oldRegion.Peers {
+			newPeers[i] = &metapb.Peer{
+				Id:      split.NewPeerIds[i],
+				StoreId: peer.StoreId,
+			}
+		}
+		newRegion.Peers = newPeers
+
+		oldRegion.RegionEpoch.Version++
+		oldRegion.EndKey = split.SplitKey
+		// 元信息持久化
+		meta.WriteRegionState(wb, oldRegion, rspb.PeerState_Normal)
+		meta.WriteRegionState(wb, newRegion, rspb.PeerState_Normal)
+		// 3. 创建peer并注册，启动
+		newPeer, err := createPeer(d.ctx.store.Id, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
+		if err != nil {
+			panic(err)
+		}
+		d.ctx.router.register(newPeer)
+		d.ctx.router.send(newRegion.Id, message.Msg{Type: message.MsgTypeStart})
+		// 4.修改storeMeta
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		defer storeMeta.Unlock()
+		storeMeta.regionRanges.Delete(&regionItem{region: originRegion})
+		storeMeta.setRegion(oldRegion, d.peer)
+		storeMeta.setRegion(newRegion, newPeer)
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: oldRegion})
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
+
+		if d.IsLeader() {
+			log.Infof("%s split region into [%s - %s] & [%s - %s] success.", d.Tag,
+				hex.EncodeToString(oldRegion.GetStartKey()), hex.EncodeToString(oldRegion.GetEndKey()),
+				hex.EncodeToString(newRegion.GetStartKey()), hex.EncodeToString(newRegion.GetEndKey()))
+		}
+		d.notifyHeartbeatScheduler(oldRegion, d.peer)
+		d.notifyHeartbeatScheduler(newRegion, newPeer)
+		d.handleProposal(entry, func(p *proposal) {
+			p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType: raft_cmdpb.AdminCmdType_Split,
+					Split:   &raft_cmdpb.SplitResponse{Regions: []*metapb.Region{oldRegion, newRegion}},
+				},
+			})
+		})
 	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	}
 	return wb
@@ -146,6 +248,7 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	err := msg.Unmarshal(cc.Context)
 	region := d.Region()
+	// 1. 检查当前的region epoch是否是最新的
 	err = util.CheckRegionEpoch(msg, region, true)
 	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
 		d.handleProposal(entry, func(p *proposal) {
@@ -153,6 +256,7 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 		})
 		return
 	}
+	// 2. 找到当前node_id在region记录的数组下标，便于后续删除
 	targetPeer := msg.AdminRequest.ChangePeer.Peer
 	peerIndex := d.findPeerIndex(region, cc.NodeId)
 	switch cc.ChangeType {
@@ -175,9 +279,11 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 		d.removePeerCache(targetPeer.Id)
 		log.Infof("%s remove node %d", d.Tag, targetPeer.Id)
 	}
+	// 持久化
 	region.RegionEpoch.ConfVer++
 	meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
 	d.RaftGroup.ApplyConfChange(*cc) // 修改raft层的信息，propose时仅仅将该配置同步日志，并未使用
+	d.notifyHeartbeatScheduler(region, d.peer)
 	d.handleProposal(entry, func(p *proposal) {
 		p.cb.Done(&raft_cmdpb.RaftCmdResponse{
 			Header: &raft_cmdpb.RaftResponseHeader{},
@@ -187,6 +293,20 @@ func (d *peerMsgHandler) applyConfChange(entry *eraftpb.Entry, cc *eraftpb.ConfC
 			},
 		})
 	})
+}
+
+func (d *peerMsgHandler) notifyHeartbeatScheduler(region *metapb.Region, peer *peer) {
+	clonedRegion := new(metapb.Region)
+	err := util.CloneMsg(region, clonedRegion)
+	if err != nil {
+		return
+	}
+	d.ctx.schedulerTaskSender <- &runner.SchedulerRegionHeartbeatTask{
+		Region:          clonedRegion,
+		Peer:            peer.Meta,
+		PendingPeers:    peer.CollectPendingPeers(),
+		ApproximateSize: peer.ApproximateSize,
+	}
 }
 
 func (d *peerMsgHandler) findPeerIndex(region *metapb.Region, peerId uint64) int {
@@ -392,6 +512,22 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 			return
 		}
 	case raft_cmdpb.AdminCmdType_Split:
+		err := util.CheckKeyInRegion(m.Split.SplitKey, d.Region())
+		if err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+		data, err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+		err = d.RaftGroup.Propose(data)
+		if err != nil {
+			log.Errorf("propose adminCmdType_split error: %v", err)
+			return
+		}
 	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	}
 }
@@ -414,16 +550,16 @@ func (d *peerMsgHandler) onTick() {
 		return
 	}
 	d.ticker.tickClock()
-	if d.ticker.isOnTick(PeerTickRaft) {
+	if d.ticker.isOnTick(PeerTickRaft) { // 用于触发raft心跳
 		d.onRaftBaseTick()
 	}
-	if d.ticker.isOnTick(PeerTickRaftLogGC) {
+	if d.ticker.isOnTick(PeerTickRaftLogGC) { // 用于触发snapshot
 		d.onRaftGCLogTick()
 	}
-	if d.ticker.isOnTick(PeerTickSchedulerHeartbeat) {
+	if d.ticker.isOnTick(PeerTickSchedulerHeartbeat) { //
 		d.onSchedulerHeartbeatTick()
 	}
-	if d.ticker.isOnTick(PeerTickSplitRegionCheck) {
+	if d.ticker.isOnTick(PeerTickSplitRegionCheck) { // 用于触发region split
 		d.onSplitRegionCheckTick()
 	}
 	d.ctx.tickDriverSender <- d.regionId
@@ -773,7 +909,7 @@ func (d *peerMsgHandler) validateSplitRegion(epoch *metapb.RegionEpoch, splitKey
 
 	if !d.IsLeader() {
 		// region on this store is no longer leader, skipped.
-		log.Infof("%s not leader, skip", d.Tag)
+		log.Debugf("%s not leader, skip", d.Tag)
 		return &util.ErrNotLeader{
 			RegionId: d.regionId,
 			Leader:   d.getPeerFromCache(d.LeaderId()),
