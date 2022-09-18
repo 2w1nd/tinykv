@@ -523,7 +523,7 @@ func TestCommitConflictRollback4B(t *testing.T) {
 	})
 	resp := builder.runOneRequest(cmd).(*kvrpcpb.CommitResponse)
 
-	assert.NotNil(t, resp.Error)
+	assert.Nil(t, resp.Error) // 这里要改成nil
 	assert.Nil(t, resp.RegionError)
 	builder.assertLens(0, 0, 1)
 	builder.assert([]kv{

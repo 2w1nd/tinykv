@@ -39,6 +39,7 @@ func NewLatches() *Latches {
 
 // AcquireLatches tries lock all Latches specified by keys. If this succeeds, nil is returned. If any of the keys are
 // locked, then AcquireLatches requires a WaitGroup which the thread can use to be woken when the lock is free.
+// 获取该key的锁，如果该键存在wait group则返回让当前请求等待，否则则添加wait group表示当前占用，返回nil为成功
 func (l *Latches) AcquireLatches(keysToLatch [][]byte) *sync.WaitGroup {
 	l.latchGuard.Lock()
 	defer l.latchGuard.Unlock()

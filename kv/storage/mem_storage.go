@@ -177,8 +177,8 @@ func (mr *memReader) IterCF(cf string) engine_util.DBIterator {
 	return &memIter{data, min.(memItem), mr}
 }
 
-func (r *memReader) Close() {
-	if r.iterCount > 0 {
+func (mr *memReader) Close() {
+	if mr.iterCount > 0 {
 		panic("Unclosed iterator")
 	}
 }

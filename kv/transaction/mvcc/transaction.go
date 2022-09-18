@@ -101,6 +101,7 @@ func (txn *MvccTxn) DeleteLock(key []byte) {
 func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	iter.Seek(EncodeKey(key, txn.StartTS))
 	if !iter.Valid() {
 		return nil, nil
@@ -155,6 +156,7 @@ func (txn *MvccTxn) DeleteValue(key []byte) {
 func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	for iter.Seek(EncodeKey(key, math.MaxUint64)); iter.Valid(); iter.Next() {
 		item := iter.Item()
 		tarKey := item.KeyCopy(nil)
@@ -182,6 +184,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
 	iter.Seek(EncodeKey(key, math.MaxUint64))
 	if !iter.Valid() {
 		return nil, 0, nil
