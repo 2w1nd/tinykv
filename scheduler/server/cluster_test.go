@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"testing"
 
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
@@ -57,6 +58,12 @@ func (s *testClusterInfoSuite) setUpTestCluster(c *C) (*RaftCluster, []*core.Reg
 	}
 
 	return cluster, regions
+}
+
+func TestCluster(t *testing.T) {
+	s := &testClusterInfoSuite{}
+	c := &C{}
+	s.TestRegionNotUpdate3C(c)
 }
 
 func (s *testClusterInfoSuite) TestRegionNotUpdate3C(c *C) {

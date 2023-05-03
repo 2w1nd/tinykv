@@ -78,7 +78,7 @@ func (s *heartbeatStreams) run() {
 		select {
 		case update := <-s.streamCh:
 			s.streams[update.storeID] = update.stream
-		case msg := <-s.msgCh:
+		case msg := <-s.msgCh: // kv上报region，store信息
 			storeID := msg.GetTargetPeer().GetStoreId()
 			store := s.cluster.GetStore(storeID)
 			if store == nil {
@@ -99,7 +99,7 @@ func (s *heartbeatStreams) run() {
 					zap.Uint64("region-id", msg.RegionId),
 					zap.Uint64("store-id", storeID))
 			}
-		case <-keepAliveTicker.C:
+		case <-keepAliveTicker.C: // kv探活
 			for storeID, stream := range s.streams {
 				store := s.cluster.GetStore(storeID)
 				if store == nil {

@@ -16,11 +16,10 @@ package server
 import (
 	"context"
 	"fmt"
-	"testing"
-
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/testutil"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/config"
 	. "github.com/pingcap/check"
+	"testing"
 )
 
 func TestServer(t *testing.T) {

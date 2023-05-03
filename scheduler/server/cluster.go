@@ -279,25 +279,30 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
-	regionEpoch := region.GetRegionEpoch()
-	originRegion := c.GetRegion(region.GetID())
-	if originRegion != nil {
-		if originRegion.GetRegionEpoch().ConfVer < regionEpoch.ConfVer ||
-			originRegion.GetRegionEpoch().Version < regionEpoch.Version {
-			return ErrRegionIsStale(region.GetMeta(), originRegion.GetMeta())
+	epoch := region.GetRegionEpoch()
+	if epoch == nil {
+		return errors.Errorf("region has no epoch")
+	}
+	oldRegion := c.GetRegion(region.GetID())
+	if oldRegion != nil {
+		oldEpoch := oldRegion.GetRegionEpoch()
+		if epoch.ConfVer < oldEpoch.ConfVer ||
+			epoch.Version < oldEpoch.Version {
+			return errors.Errorf("region is stale")
 		}
 	} else {
 		regions := c.ScanRegions(region.GetStartKey(), region.GetEndKey(), -1)
 		for _, r := range regions {
-			if r.GetRegionEpoch().ConfVer < regionEpoch.ConfVer ||
-				r.GetRegionEpoch().Version < regionEpoch.Version {
-				return ErrRegionIsStale(region.GetMeta(), originRegion.GetMeta())
+			rEpoch := r.GetRegionEpoch()
+			if epoch.ConfVer < rEpoch.ConfVer ||
+				epoch.Version < rEpoch.Version {
+				return errors.Errorf("region is stale")
 			}
 		}
 	}
 	c.putRegion(region)
-	for i := range region.GetStoreIds() {
-		c.updateStoreStatusLocked(i)
+	for id := range region.GetStoreIds() {
+		c.updateStoreStatusLocked(id)
 	}
 	return nil
 }
